@@ -1,26 +1,21 @@
 import os
+import shutil # Import shutil for moving files
 from ultralytics import YOLO
 
 def generate_yolov11_onnx():
     """
     Loads the YOLOv11l model, exports it to ONNX format,
-    and saves the ONNX model to the specified /models directory.
+    and moves the ONNX model to the specified /models directory.
     """
     print("Starting YOLOv11l ONNX model generation...")
 
-    # Define the path to the models directory relative to the script's location
-    # Assuming this script is in 'your_repo/scripts/' and models are in 'your_repo/models/'
-    # os.path.dirname(__file__) gets the directory of the current script (scripts/)
-    # '..' moves up one level to the parent directory (your_repo/)
-    # 'models' then points to the models directory (your_repo/models/)
+    # Define the target models directory relative to the script's location
     models_dir = os.path.join(os.path.dirname(__file__), '..', 'models')
-    
-    # Ensure the models directory exists. If it doesn't, create it.
-    os.makedirs(models_dir, exist_ok=True) 
+    os.makedirs(models_dir, exist_ok=True) # Ensure the models directory exists
 
-    # Define the full path for the output ONNX model, including the filename
+    # Define the desired final output filename
     output_onnx_filename = 'yolov11l.onnx'
-    output_onnx_path = os.path.join(models_dir, output_onnx_filename)
+    final_output_path = os.path.join(models_dir, output_onnx_filename)
 
     try:
         # Load a pretrained YOLOv11l model.
@@ -29,13 +24,24 @@ def generate_yolov11_onnx():
         model = YOLO('yolo11l.pt')
 
         # Export the model to ONNX format.
-        # We now explicitly pass the full output path using the 'filename' argument.
-        print(f"Exporting YOLOv11l model to ONNX format and saving to: {output_onnx_path}")
-        # The 'export' method will save the file to the path specified in 'filename'.
-        # imgsz=1024 is used as YOLOv11 models often use this input size for ONNX export.
-        model.export(format='onnx', imgsz=1024, filename=output_onnx_path) 
+        # The 'export' method will save the file to a default location (e.g., runs/export/yolo11l.onnx).
+        # We specify 'yolo11l' as the name for the exported file, which will be used in the default path.
+        print(f"Exporting YOLOv11l model to ONNX format...")
+        export_results = model.export(format='onnx', imgsz=1024, name='yolov11l') 
+        
+        # The export_results object contains the path to the exported file.
+        # We need to extract the actual path of the generated ONNX file.
+        # Ultralytics typically saves to 'runs/export/name_of_model.onnx'
+        # The export_results object directly returns the path of the exported file.
+        exported_file_path = export_results 
 
-        print(f"YOLOv11l ONNX model successfully exported to: {output_onnx_path}")
+        print(f"Model initially exported to: {exported_file_path}")
+
+        # Move the exported ONNX file to the desired models directory
+        print(f"Moving exported model to: {final_output_path}")
+        shutil.move(exported_file_path, final_output_path)
+
+        print(f"YOLOv11l ONNX model successfully exported and moved to: {final_output_path}")
 
     except Exception as e:
         print(f"An error occurred during model generation: {e}")
