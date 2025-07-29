@@ -19,16 +19,24 @@ pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0 gstreamer-app-1.0)
 pkg_check_modules(GLIB REQUIRED glib-2.0)
 find_package(yaml-cpp REQUIRED)
 
-# Find the DeepStream metadata library
+# Find DeepStream libraries
 find_library(NVDS_META_LIB
-  NAMES nvdsgst_meta
-  PATHS /opt/nvidia/deepstream/deepstream/lib/
+  NAMES nvds_meta
+  PATHS /opt/nvidia/deepstream/deepstream-7.1/lib/
   NO_DEFAULT_PATH
 )
 if(NOT NVDS_META_LIB)
-  message(FATAL_ERROR "DeepStream nvdsgst_meta library not found!")
+  message(FATAL_ERROR "DeepStream nvds_meta library not found! Please ensure libnvds_meta.so is in /opt/nvidia/deepstream/deepstream/lib/")
 endif()
 
+find_library(GST_NVDS_META_LIB
+  NAMES nvdsgst_meta
+  PATHS /opt/nvidia/deepstream/deepstream-7.1/lib/
+  NO_DEFAULT_PATH
+)
+if(NOT GST_NVDS_META_LIB)
+  message(FATAL_ERROR "DeepStream gstnvdsmeta library not found! Please ensure libgstnvdsmeta.so is in /opt/nvidia/deepstream/deepstream/lib/")
+endif()
 
 # Build the C++ node executable
 add_executable(object_detection_node src/object_detection.cpp)
@@ -57,6 +65,7 @@ target_link_libraries(object_detection_node
   ${GSTREAMER_LIBRARIES}
   ${GLIB_LIBRARIES}
   ${NVDS_META_LIB}
+  ${GST_NVDS_META_LIB}
   ${YAML_CPP_LIBRARIES}
   ${cv_bridge_LIBRARIES}
 )
