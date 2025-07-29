@@ -1,0 +1,36 @@
+# YOLOv11 Primary GIE Configuration
+
+[property]
+#-- General Properties
+gpu-id=0
+net-scale-factor=0.0039215697906911373 # 1/255
+model-engine-file=../../models/yolov11.onnx_b1_gpu0_fp16.engine
+onnx-file=src/ros2_object_detection/models/yolo11l.onnx
+labelfile-path=/home/def/ros2/src/ros2_object_detection/models/labels.txt
+network-mode=2 # 0=FP32, 1=INT8, 2=FP16
+num-detected-classes=80 #-- IMPORTANT: Change this to the number of classes in your model
+gie-unique-id=1
+process-mode=1 # 1=Primary GIE, 2=Secondary GIE
+#-- Model Input Configuration
+model-color-format=0 # 0=RGB, 1=BGR
+network-input-order=0 # 0=NCHW, 1=NHWC
+input-dims=3;1280;1280;0 # C;H;W; (N is ignored)
+#-- Custom YOLO Parser Configuration
+parse-bbox-func-name=NvDsInferParseYolo
+custom-lib-path=/home/def/DeepStream-Yolo/nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so
+
+[class-attrs-all]
+pre-cluster-threshold=0.25
+eps=0.3
+group-threshold=1
+
+#-- YOLO Model Specific Configuration
+[yolo]
+# 0=yolov5, 1=yolov8, 2=yolov10, 3=yolonas, 4=yolor, 5=yolov7, 6=yolov6, 7=yolov9, 8=yolox, 9=ppyoloe, 10=damoyolo, 11=yolov11
+model-type=11
+num-classes=80 #-- IMPORTANT: Must match num-detected-classes above
+confidence-threshold=0.5
+nms-threshold=0.45
+# Network input dimensions
+net-width=1280
+net-height=1280
