@@ -1,10 +1,10 @@
 import os
-import shutil # Import shutil for moving files
+import shutil
 from ultralytics import YOLO
 
 def generate_yolov11_onnx():
     """
-    Loads the YOLOv11l model, exports it to ONNX format,
+    Loads the YOLOv11l model, exports it to ONNX format with a specific input size,
     and moves the ONNX model to the specified /models directory.
     """
     print("Starting YOLOv11l ONNX model generation...")
@@ -17,22 +17,20 @@ def generate_yolov11_onnx():
     output_onnx_filename = 'yolov11l.onnx'
     final_output_path = os.path.join(models_dir, output_onnx_filename)
 
+    # Define the desired input image size for the ONNX model to match DeepStream config
+    # This must match the H and W in infer-dims=C;H;W in pgie_yolov11_config.txt
+    target_img_size = 1280 
+
     try:
         # Load a pretrained YOLOv11l model.
-        # This will automatically download the .pt weights if they are not already present.
         print(f"Loading YOLOv11l model from 'yolo11l.pt'. This may download the model if not found locally.")
         model = YOLO('yolo11l.pt')
 
         # Export the model to ONNX format.
-        # The 'export' method will save the file to a default location (e.g., runs/export/yolo11l.onnx).
-        # We specify 'yolo11l' as the name for the exported file, which will be used in the default path.
-        print(f"Exporting YOLOv11l model to ONNX format...")
-        export_results = model.export(format='onnx', imgsz=1024, name='yolov11l') 
+        # Crucially, set imgsz to match the infer-dims in the DeepStream config.
+        print(f"Exporting YOLOv11l model to ONNX format with imgsz={target_img_size} and saving to: {final_output_path}")
+        export_results = model.export(format='onnx', imgsz=target_img_size, name='yolov11l', opset=12) 
         
-        # The export_results object contains the path to the exported file.
-        # We need to extract the actual path of the generated ONNX file.
-        # Ultralytics typically saves to 'runs/export/name_of_model.onnx'
-        # The export_results object directly returns the path of the exported file.
         exported_file_path = export_results 
 
         print(f"Model initially exported to: {exported_file_path}")
