@@ -13,11 +13,12 @@ find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(Eigen3 REQUIRED) # This finds Eigen and sets EIGEN3_INCLUDE_DIRS
+find_package(yaml-cpp REQUIRED)
 
 # Find GStreamer, GLib, and yaml-cpp
 pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0 gstreamer-app-1.0)
 pkg_check_modules(GLIB REQUIRED glib-2.0)
-find_package(yaml-cpp REQUIRED)
 
 # Find DeepStream libraries
 find_library(NVDS_META_LIB
@@ -26,7 +27,7 @@ find_library(NVDS_META_LIB
   NO_DEFAULT_PATH
 )
 if(NOT NVDS_META_LIB)
-  message(FATAL_ERROR "DeepStream nvds_meta library not found! Please ensure libnvds_meta.so is in /opt/nvidia/deepstream/deepstream/lib/")
+  message(FATAL_ERROR "DeepStream nvds_meta library not found! Please ensure libnvds_meta.so is in /opt/nvidia/deepstream/deepstream-7.1/lib/")
 endif()
 
 find_library(GST_NVDS_META_LIB
@@ -35,7 +36,7 @@ find_library(GST_NVDS_META_LIB
   NO_DEFAULT_PATH
 )
 if(NOT GST_NVDS_META_LIB)
-  message(FATAL_ERROR "DeepStream gstnvdsmeta library not found! Please ensure libgstnvdsmeta.so is in /opt/nvidia/deepstream/deepstream/lib/")
+  message(FATAL_ERROR "DeepStream gstnvdsmeta library not found! Please ensure libgstnvdsmeta.so is in /opt/nvidia/deepstream/deepstream-7.1/lib/")
 endif()
 
 # Build the C++ node executable
@@ -49,6 +50,7 @@ ament_target_dependencies(object_detection_node
   cv_bridge
   sensor_msgs
   image_transport
+  Eigen3 # Keep this here, it helps with ROS dependency tracking
 )
 
 # Add the include directories so the compiler can find all necessary headers
@@ -58,6 +60,7 @@ target_include_directories(object_detection_node PUBLIC
   ${GLIB_INCLUDE_DIRS}
   /opt/nvidia/deepstream/deepstream/sources/includes/
   ${YAML_CPP_INCLUDE_DIRS}
+  ${EIGEN3_INCLUDE_DIRS} # <-- ADDED THIS LINE FOR EIGEN HEADERS
 )
 
 # Link against all required libraries
@@ -68,6 +71,9 @@ target_link_libraries(object_detection_node
   ${GST_NVDS_META_LIB}
   ${YAML_CPP_LIBRARIES}
   ${cv_bridge_LIBRARIES}
+  # Eigen is typically header-only, so explicit linking here is often not needed.
+  # If you encounter linking errors later, you might need to add:
+  # ${EIGEN3_LIBS}
 )
 
 # Install targets
