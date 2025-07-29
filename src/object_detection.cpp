@@ -339,7 +339,7 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
         double predicted_x = 0.0, predicted_y = 0.0;
         double predicted_vx = 0.0, predicted_vy = 0.0;
 
-        // Only process KF if an object is currently selected
+        // Process KF only if an object is currently selected
         if (node->selected_object_id_ != UNTRACKED_OBJECT_ID) {
             // Retrieve DeepStream tracker's state for the selected object from user metadata
             // Reset to EMPTY (lost) for the current frame, then try to find the actual state if object is detected.
@@ -416,7 +416,11 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
                         // continue using KF's prediction for drawing and tracking.
                     }
                 }
-                // Always retrieve the latest predicted/updated state from KF for OSD
+            } // End of else (KF is initialized)
+
+            // --- Retrieve predicted values ONLY IF KF is still valid AFTER all state updates/deselection ---
+            // This is the critical change to prevent null pointer dereference.
+            if (node->selected_object_kf_initialized_ && node->selected_object_kf_) {
                 predicted_x = node->selected_object_kf_->getX();
                 predicted_y = node->selected_object_kf_->getY();
                 predicted_vx = node->selected_object_kf_->getVx();
@@ -424,13 +428,31 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
 
                 // Update `selected_object_last_bbox_` with KF's current estimated position for drawing.
                 // We keep the original width and height from the last detection to maintain visual size.
-                if (node->selected_object_id_ != UNTRACKED_OBJECT_ID) { // Ensure object is still selected
-                    node->selected_object_last_bbox_.left = predicted_x - node->selected_object_last_bbox_.width / 2.0;
-                    node->selected_object_last_bbox_.top = predicted_y - node->selected_object_last_bbox_.height / 2.0;
-                }
+                // This will be used for both OSD drawing on `obj_meta` (if detected) or via new display_meta (if occluded).
+                node->selected_object_last_bbox_.left = predicted_x - node->selected_object_last_bbox_.width / 2.0;
+                node->selected_object_last_bbox_.top = predicted_y - node->selected_object_last_bbox_.height / 2.0;
+            } else {
+                // If KF is not initialized or was just reset (object deselected),
+                // ensure predicted values are zeroed out for OSD display consistency.
+                predicted_x = 0.0; predicted_y = 0.0; predicted_vx = 0.0; predicted_vy = 0.0;
+                // `selected_object_last_bbox_` will retain its last valid state or its default {0,0,0,0} from constructor
+                // when `selected_object_id_` becomes UNTRACKED_OBJECT_ID.
+                // If this path is taken, the subsequent drawing logic for the selected object (below)
+                // should correctly interpret UNTRACKED_OBJECT_ID and not attempt to draw anything.
             }
         } // End of selected_object_id_ != UNTRACKED_OBJECT_ID block
-
+        else { // selected_object_id_ is UNTRACKED_OBJECT_ID
+            // If no object is selected, ensure all KF related states are reset.
+            // This handles cases where deselection might happen through `cycle_selected_target` or on node init.
+            if (node->selected_object_kf_initialized_ || node->selected_object_kf_) {
+                node->selected_object_kf_initialized_ = false;
+                node->selected_object_kf_.reset();
+                node->selected_object_lost_frames_ = 0;
+                node->selected_object_tracker_state_ = EMPTY;
+            }
+            // Set predicted values to zero as no object is selected.
+            predicted_x = 0.0; predicted_y = 0.0; predicted_vx = 0.0; predicted_vy = 0.0;
+        }
 
         // --- Second pass: Customize OSD for all objects, including the selected one ---
         // This loop iterates through all `NvDsObjectMeta` from the DeepStream pipeline.
@@ -446,7 +468,7 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
             // Handle OSD for the currently selected object
             if (obj_meta->object_id == node->selected_object_id_)
             {
-                // Ensure KF is initialized and object is still selected before using predicted info
+                // Only use KF predicted info if KF is initialized and an object is still selected
                 if (node->selected_object_kf_initialized_ && node->selected_object_id_ != UNTRACKED_OBJECT_ID) {
                     // Override `rect_params` with KF's predicted bounding box for rendering
                     obj_meta->rect_params = node->selected_object_last_bbox_; // Use KF predicted bbox for drawing
@@ -478,7 +500,8 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
                     }
                 } else {
                     // This case occurs if the object was selected, but KF isn't initialized yet (e.g., first frame of selection)
-                    // or if it was just deselected. Just draw its detected info.
+                    // or if it was just deselected and still present in obj_meta_list briefly.
+                    // Just draw its detected info with red highlight, without KF/DS state info.
                     ss_label_conf << obj_meta->obj_label << " ID: " << obj_meta->object_id
                                   << " Conf: " << std::fixed << std::setprecision(2) << obj_meta->confidence;
                     obj_meta->rect_params.border_color = {1.0, 0.0, 0.0, 1.0}; // Still highlight red
@@ -520,6 +543,7 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
         // This is crucial: If the selected object is *not* currently detected by the primary detector (i.e., it's occluded),
         // its `NvDsObjectMeta` won't be in `frame_meta->obj_meta_list`. In this case, we need to acquire new
         // `NvDsDisplayMeta` to manually draw its predicted bounding box, reticule, and KF text.
+        // This block only executes if an object is selected, KF is initialized, AND it was NOT found by detector in this frame.
         if (node->selected_object_id_ != UNTRACKED_OBJECT_ID && node->selected_object_kf_initialized_ && !selected_object_found_in_frame)
         {
             // Use KF's predicted bounding box for drawing (from `selected_object_last_bbox_`)
