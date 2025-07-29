@@ -18,6 +18,7 @@ network-type=0
 cluster-mode=2
 maintain-aspect-ratio=1
 symmetric-padding=1
+infer-dims=3;1280;1280
 parse-bbox-func-name=NvDsInferParseYoloCuda
 custom-lib-path=/home/jorn-deruyck/ros2/src/DeepStream-Yolo/nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so
 engine-create-func-name=NvDsInferYoloCudaEngineGet
