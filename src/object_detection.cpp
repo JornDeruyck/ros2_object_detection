@@ -18,7 +18,11 @@
 #include "vision_msgs/msg/detection2_d.hpp"
 #include "vision_msgs/msg/object_hypothesis_with_pose.hpp"
 #include <sensor_msgs/msg/compressed_image.hpp>
+#include "sensor_msgs/msg/joy.hpp" // Added for joystick input
 #include <opencv2/opencv.hpp> // Not explicitly used for OSD, but good to keep if needed for image processing
+
+// Define the threshold for how many frames an object can be lost before deselection
+#define SELECTED_OBJECT_LOST_THRESHOLD 20
 
 // === Appsink callback: get frames, compress, publish ===
 // This callback is triggered when a new sample (frame) is available in the appsink.
@@ -90,9 +94,9 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
         node->last_fps_update_time_ = now;
     }
 
-    // Lock mutex for tracked objects
+    // Lock mutex for tracked objects and selected object state
     std::lock_guard<std::mutex> lock_objects(node->tracked_objects_mutex_); // Use different lock name
-    node->current_tracked_objects_.clear(); // Clear objects from previous frame
+    node->current_tracked_objects_.clear(); // Clear objects from previous frame, will be repopulated
 
     // Iterate through each frame in the batch (though this pipeline has batch-size=1)
     for (GList *l_frame = batch_meta->frame_meta_list; l_frame != nullptr; l_frame = l_frame->next)
@@ -186,12 +190,15 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
             obj_meta->text_params.set_bg_clr = 0; // No background box
         }
 
-        // --- Draw Reticule for Selected Object (using a new NvDsDisplayMeta) ---
+        // --- Manage selected_object_id_ persistence and draw Reticule ---
         if (node->selected_object_id_ != UNTRACKED_OBJECT_ID)
         {
             auto it = node->current_tracked_objects_.find(node->selected_object_id_);
             if (it != node->current_tracked_objects_.end())
             {
+                // Selected object is currently visible
+                node->selected_object_lost_frames_ = 0; // Reset lost frame counter
+
                 NvOSD_RectParams &selected_rect = it->second;
                 gfloat center_x = selected_rect.left + selected_rect.width / 2.0;
                 gfloat center_y = selected_rect.top + selected_rect.height / 2.0;
@@ -224,8 +231,18 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
                     nvds_add_display_meta_to_frame(frame_meta, reticule_display_meta);
                 }
             } else {
-                // If selected object is no longer tracked, reset selection
-                node->selected_object_id_ = UNTRACKED_OBJECT_ID;
+                // Selected object is NOT currently visible
+                node->selected_object_lost_frames_++;
+                RCLCPP_DEBUG(node->get_logger(), "Selected object ID %lu lost for %u frames.",
+                             node->selected_object_id_, node->selected_object_lost_frames_);
+
+                if (node->selected_object_lost_frames_ > SELECTED_OBJECT_LOST_THRESHOLD)
+                {
+                    RCLCPP_INFO(node->get_logger(), "Selected object ID %lu lost for too long (%u frames). Deselecting.",
+                                node->selected_object_id_, node->selected_object_lost_frames_);
+                    node->selected_object_id_ = UNTRACKED_OBJECT_ID; // Deselect
+                    node->selected_object_lost_frames_ = 0; // Reset counter
+                }
             }
         }
     }
@@ -247,7 +264,10 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
       last_fps_update_time_(std::chrono::steady_clock::now()), // Set initial time
       frame_counter_(0),                                       // Reset frame counter
       current_fps_display_(0.0),                               // Initialize displayed FPS to zero
-      selected_object_id_(UNTRACKED_OBJECT_ID)                 // Initialize selected object to untracked
+      selected_object_id_(UNTRACKED_OBJECT_ID),                // Initialize selected object to untracked
+      selected_object_lost_frames_(0),                         // Initialize lost frames counter
+      button0_pressed_prev_(false),                            // Initialize button 0 state
+      button1_pressed_prev_(false)                             // Initialize button 1 state
 {
     // Declare and load pipeline configuration from ROS parameter
     auto config_path = this->declare_parameter<std::string>("pipeline_config");
@@ -262,6 +282,12 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
     // Create ROS publishers for detections and compressed images
     detection_publisher_ = this->create_publisher<vision_msgs::msg::Detection2DArray>("detections", qos);
     compressed_publisher_ = this->create_publisher<sensor_msgs::msg::CompressedImage>("image_raw/compressed", qos);
+
+    // Create joystick subscriber
+    // IMPORTANT: You need a separate ROS2 node (e.g., joy_node or keyboard_joy_node) publishing to /joy
+    // Check your joystick driver's output for actual button mappings.
+    joy_subscription_ = this->create_subscription<sensor_msgs::msg::Joy>(
+        "/joy", 10, std::bind(&ObjectDetectionNode::joy_callback, this, std::placeholders::_1));
 
     // Init GStreamer
     gst_init(nullptr, nullptr);
@@ -334,7 +360,7 @@ ObjectDetectionNode::~ObjectDetectionNode()
     // Join the GStreamer thread to ensure it finishes
     if (gstreamer_thread_.joinable())
     {
-        gstreamer_thread_.join(); // Corrected: Use std::thread::join() for std::thread
+        gstreamer_thread_.join();
     }
     // Set pipeline state to NULL and unreference it to release resources
     if (pipeline_)
@@ -350,7 +376,7 @@ ObjectDetectionNode::~ObjectDetectionNode()
 }
 
 // === Method to cycle through detected targets ===
-void ObjectDetectionNode::cycle_selected_target()
+void ObjectDetectionNode::cycle_selected_target(bool forward)
 {
     std::lock_guard<std::mutex> lock(tracked_objects_mutex_);
 
@@ -367,29 +393,77 @@ void ObjectDetectionNode::cycle_selected_target()
     {
         object_ids.push_back(pair.first);
     }
+    std::sort(object_ids.begin(), object_ids.end()); // Sort to ensure consistent cycling order
 
     // Find the currently selected object's position in the vector
     auto it = std::find(object_ids.begin(), object_ids.end(), selected_object_id_);
 
     if (it == object_ids.end() || selected_object_id_ == UNTRACKED_OBJECT_ID)
     {
-        // If no object is selected or current selection is no longer valid, select the first one
-        selected_object_id_ = object_ids[0];
+        // If no object is selected or current selection is no longer valid, select the first one (or last if backward)
+        if (forward) {
+            selected_object_id_ = object_ids[0];
+        } else {
+            selected_object_id_ = object_ids.back();
+        }
     }
     else
     {
-        // Move to the next object, or wrap around to the first if at the end
-        ++it;
-        if (it == object_ids.end())
-        {
-            selected_object_id_ = object_ids[0];
-        }
-        else
-        {
-            selected_object_id_ = *it;
+        if (forward) {
+            // Move to the next object, or wrap around to the first if at the end
+            ++it;
+            if (it == object_ids.end())
+            {
+                selected_object_id_ = object_ids[0];
+            }
+            else
+            {
+                selected_object_id_ = *it;
+            }
+        } else {
+            // Move to the previous object, or wrap around to the last if at the beginning
+            if (it == object_ids.begin())
+            {
+                selected_object_id_ = object_ids.back();
+            }
+            else
+            {
+                --it;
+                selected_object_id_ = *it;
+            }
         }
     }
     RCLCPP_INFO(this->get_logger(), "Selected object ID: %lu", selected_object_id_);
+    // Reset lost frames counter immediately upon (re)selection
+    selected_object_lost_frames_ = 0;
+}
+
+// === Callback for joystick input ===
+void ObjectDetectionNode::joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
+{
+    // Assuming button 0 for forward, button 1 for backward
+    const int FORWARD_BUTTON_INDEX = 0;
+    const int BACKWARD_BUTTON_INDEX = 1;
+
+    bool current_button0_pressed = (msg->buttons.size() > FORWARD_BUTTON_INDEX && msg->buttons[FORWARD_BUTTON_INDEX] == 1);
+    bool current_button1_pressed = (msg->buttons.size() > BACKWARD_BUTTON_INDEX && msg->buttons[BACKWARD_BUTTON_INDEX] == 1);
+
+    // Debounce for forward button
+    if (current_button0_pressed && !button0_pressed_prev_)
+    {
+        RCLCPP_INFO(this->get_logger(), "Joystick button %d pressed. Cycling target forward.", FORWARD_BUTTON_INDEX);
+        cycle_selected_target(true); // Cycle forward
+    }
+    // Debounce for backward button
+    else if (current_button1_pressed && !button1_pressed_prev_)
+    {
+        RCLCPP_INFO(this->get_logger(), "Joystick button %d pressed. Cycling target backward.", BACKWARD_BUTTON_INDEX);
+        cycle_selected_target(false); // Cycle backward
+    }
+
+    // Update previous button states
+    button0_pressed_prev_ = current_button0_pressed;
+    button1_pressed_prev_ = current_button1_pressed;
 }
 
 // === Main entrypoint ===
@@ -399,13 +473,6 @@ int main(int argc, char *argv[])
     rclcpp::init(argc, argv);
     rclcpp::NodeOptions options;
     auto node = std::make_shared<ObjectDetectionNode>(options);
-
-     //Example: To test cycling targets, you could set up a timer or a ROS2 service/topic
-     //to call node->cycle_selected_target()
-     //For manual testing, you could add a simple timer:
-     rclcpp::TimerBase::SharedPtr timer = node->create_wall_timer(
-         std::chrono::seconds(5),
-         std::bind(&ObjectDetectionNode::cycle_selected_target, node.get()));
 
     rclcpp::spin(node); // Spin the ROS2 node to process callbacks
     rclcpp::shutdown();
