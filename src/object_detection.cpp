@@ -1,17 +1,18 @@
 // src/object_detection.cpp
 #include "ros2_object_detection/object_detection.hpp"
-#include "ros2_object_detection/kalman_filter_2d.hpp" // Included for KalmanFilter2D use
-#include "ros2_object_detection/constants.hpp"        // Included for UNTRACKED_OBJECT_ID, KF_LOST_THRESHOLD
+#include "ros2_object_detection/kalman_filter_2d.hpp"
+#include "ros2_object_detection/constants.hpp"
+#include "ros2_object_detection/osd_renderer.hpp" // NEW: Include the OSD Renderer
 
 // Standard C++ includes
-#include <algorithm>   // For std::find, std::sort
-#include <chrono>      // For FPS calculation
-#include <iomanip>     // For std::setprecision
-#include <mutex>       // For FPS and object mutexes
-#include <sstream>     // For std::stringstream
-#include <string>      // For std::string
-#include <cmath>       // For std::abs
-#include <cstring>     // For memset
+#include <algorithm>
+#include <chrono>
+#include <iomanip>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <cmath>
+#include <cstring>
 
 // GStreamer & GLib includes
 #include <gst/app/gstappsink.h>
@@ -19,10 +20,10 @@
 #include <glib.h>
 
 // DeepStream metadata headers
-#include "nvdsmeta.h"        // For NvDsDisplayMeta and other core metadata structures
-#include "gstnvdsmeta.h"     // For gst_buffer_get_nvds_batch_meta
-#include "nvll_osd_struct.h" // For NvOSD_TextParams, NvOSD_RectParams, NvOSD_LineParams etc.
-#include "nvds_tracker_meta.h" // Crucial for NVDS_TRACKER_METADATA and NvDsTargetMiscDataObject (containing TRACKER_STATE)
+#include "nvdsmeta.h"
+#include "gstnvdsmeta.h"
+#include "nvll_osd_struct.h"
+#include "nvds_tracker_meta.h"
 
 // ROS 2 message types
 #include "sensor_msgs/msg/compressed_image.hpp"
@@ -99,7 +100,10 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
         NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)l_frame->data;
         if (!frame_meta) continue;
 
-        node->update_and_display_fps(batch_meta, frame_meta);
+        // Use OSD Renderer for FPS display
+        if (node->osd_renderer_) {
+            node->osd_renderer_->update_and_display_fps(batch_meta, frame_meta);
+        }
 
         // --- DEBUG SNIPPET: Inspect Frame-Level User Metadata ---
         RCLCPP_DEBUG(node->get_logger(), "Frame ID %u: %s. Iterating through frame user metadata:",
@@ -132,12 +136,23 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
                 selected_object_found_in_frame = true;
                 current_selected_bbox_detected = obj_meta->rect_params;
                 current_selected_obj_meta_ptr = obj_meta;
-            }
 
-            // Set default OSD parameters for all objects (color will be adjusted in the second pass for selected objects)
-            obj_meta->rect_params.border_width = 3;
-            obj_meta->rect_params.has_bg_color = 0;
-            obj_meta->rect_params.border_color = {0.0, 0.0, 1.0, 1.0}; // Default blue for non-selected objects
+                // For the selected object, we will explicitly manage its OSD later.
+                // For now, clear its default text to prevent overlap.
+                if (obj_meta->text_params.display_text) {
+                    g_free(obj_meta->text_params.display_text);
+                    obj_meta->text_params.display_text = nullptr;
+                }
+                // Set border to 0 width for selected object if it's detected,
+                // so we can draw our own custom bounding box (or let DeepStream draw it with red)
+                // based on the logic in OSD_Renderer.
+                obj_meta->rect_params.border_width = 0;
+            } else {
+                // For non-selected objects, apply standard OSD
+                if (node->osd_renderer_) {
+                    node->osd_renderer_->render_non_selected_object_osd(obj_meta);
+                }
+            }
         }
 
         double predicted_x = 0.0, predicted_y = 0.0;
@@ -150,25 +165,22 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
             current_selected_obj_meta_ptr,
             predicted_x, predicted_y, predicted_vx, predicted_vy);
 
-        // Second pass: Customize OSD for all detected objects (including the selected one if detected)
-        for (GList *l_obj = frame_meta->obj_meta_list; l_obj != nullptr; l_obj = l_obj->next)
-        {
-            NvDsObjectMeta *obj_meta = (NvDsObjectMeta *)l_obj->data;
-            if (!obj_meta) continue;
-
-            bool is_selected_and_kf_initialized = (obj_meta->object_id == node->selected_object_id_ && node->selected_object_kf_initialized_);
-            node->customize_object_osd(
-                obj_meta,
-                is_selected_and_kf_initialized,
-                predicted_vx, predicted_vy,
-                selected_object_found_in_frame);
-        }
-
-        // Draw reticule and KF-predicted bounding box for selected object (ALWAYS, if selected and KF initialized)
-        if (node->selected_object_id_ != UNTRACKED_OBJECT_ID && node->selected_object_kf_initialized_)
-        {
-            node->draw_selected_object_overlay(
-                batch_meta, frame_meta, predicted_vx, predicted_vy);
+        // After processing all objects and updating KF, render OSD for the selected object if one is active.
+        // This call happens OUTSIDE the object iteration loop, ensuring it's always drawn if selected.
+        if (node->selected_object_id_ != UNTRACKED_OBJECT_ID && node->osd_renderer_) {
+            node->osd_renderer_->render_selected_object_osd(
+                batch_meta,
+                frame_meta,
+                node->selected_object_id_,
+                node->selected_object_kf_initialized_,
+                node->selected_object_last_bbox_,
+                node->selected_object_lost_frames_,
+                node->selected_object_tracker_state_,
+                predicted_vx,
+                predicted_vy,
+                selected_object_found_in_frame, // Pass whether the selected object was detected in this frame
+                current_selected_obj_meta_ptr   // Pass the actual NvDsObjectMeta if detected
+            );
         }
     } // End of frame loop
 
@@ -183,9 +195,6 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
 // --- Constructor ---
 ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
     : Node("object_detection_node", options),
-      last_fps_update_time_(std::chrono::steady_clock::now()),
-      frame_counter_(0),
-      current_fps_display_(0.0),
       selected_object_id_(UNTRACKED_OBJECT_ID),
       selected_object_kf_initialized_(false),
       selected_object_lost_frames_(0),
@@ -229,6 +238,9 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
     joy_subscription_ = this->create_subscription<sensor_msgs::msg::Joy>(
         "/joy", 10, std::bind(&ObjectDetectionNode::joy_callback, this, std::placeholders::_1));
     RCLCPP_INFO(this->get_logger(), "Subscribing to /joy topic for joystick input.");
+
+    // NEW: Initialize OSD Renderer
+    osd_renderer_ = std::make_unique<OSDRenderer>();
 
     gst_init(nullptr, nullptr);
     main_loop_ = g_main_loop_new(nullptr, FALSE);
@@ -312,37 +324,7 @@ ObjectDetectionNode::~ObjectDetectionNode()
     RCLCPP_INFO(this->get_logger(), "ObjectDetectionNode shut down complete.");
 }
 
-// --- Private Methods for OSD and Logic Splitting ---
-
-void ObjectDetectionNode::update_and_display_fps(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta)
-{
-    std::lock_guard<std::mutex> fps_lock(fps_mutex_);
-
-    frame_counter_++;
-    auto now = std::chrono::steady_clock::now();
-    std::chrono::duration<double> elapsed_seconds = now - last_fps_update_time_;
-
-    if (elapsed_seconds.count() >= 1.0 || frame_counter_ >= 30)
-    {
-        current_fps_display_ = frame_counter_ / elapsed_seconds.count();
-        frame_counter_ = 0;
-        last_fps_update_time_ = now;
-    }
-
-    NvDsDisplayMeta *fps_display_meta = nvds_acquire_display_meta_from_pool(batch_meta);
-    if (fps_display_meta)
-    {
-        fps_display_meta->num_labels = 1;
-        fps_display_meta->text_params[0].display_text = g_strdup_printf("FPS: %.2f", current_fps_display_);
-        fps_display_meta->text_params[0].x_offset = 10;
-        fps_display_meta->text_params[0].y_offset = 10;
-        fps_display_meta->text_params[0].font_params.font_name = (gchar *)"Sans";
-        fps_display_meta->text_params[0].font_params.font_size = 14;
-        fps_display_meta->text_params[0].font_params.font_color = {1.0, 1.0, 1.0, 1.0}; // RGBA (white)
-        fps_display_meta->text_params[0].set_bg_clr = 0;
-        nvds_add_display_meta_to_frame(frame_meta, fps_display_meta);
-    }
-}
+// --- Private Methods ---
 
 void ObjectDetectionNode::populate_ros_detection_message(NvDsObjectMeta *obj_meta, vision_msgs::msg::Detection2DArray &detection_array_msg)
 {
@@ -466,171 +448,6 @@ void ObjectDetectionNode::manage_selected_object_kalman_filter(
         }
         selected_object_tracker_state_ = EMPTY; // Ensure it's EMPTY when no object is selected
         predicted_x = 0.0; predicted_y = 0.0; predicted_vx = 0.0; predicted_vy = 0.0;
-    }
-}
-
-void ObjectDetectionNode::customize_object_osd(
-    NvDsObjectMeta *obj_meta,
-    bool is_selected_and_kf_initialized,
-    double predicted_vx, double predicted_vy,
-    bool selected_object_found_in_frame)
-{
-    // DEBUG LOG: Print tracker_confidence for every object
-    RCLCPP_DEBUG(this->get_logger(),
-                 "Object ID: %lu, Label: %s, Detector Conf: %.2f, Tracker Conf: %.2f",
-                 obj_meta->object_id, obj_meta->obj_label, obj_meta->confidence, obj_meta->tracker_confidence);
-
-    // If this object is the selected object AND it was detected in this frame,
-    // we only set its border color here. Its text and reticule will be drawn
-    // by draw_selected_object_overlay.
-    if (is_selected_and_kf_initialized && selected_object_found_in_frame)
-    {
-        obj_meta->rect_params.border_color = {1.0, 0.0, 0.0, 1.0}; // Highlight selected object in Red
-        // DO NOT set obj_meta->text_params.display_text here for the selected object.
-        // It will be handled by draw_selected_object_overlay.
-        return; // Exit early as OSD for this object is handled elsewhere
-    }
-
-    // For all other objects (non-selected), we set their OSD text and default blue border.
-    // The selected object, if occluded, will have its overlay handled by draw_selected_object_overlay.
-    std::stringstream ss_label_conf;
-    ss_label_conf << std::fixed << std::setprecision(2); // Set precision for floating-point numbers
-
-    ss_label_conf << obj_meta->obj_label << " ID: " << obj_meta->object_id
-                  << " Conf: " << obj_meta->confidence
-                  << " TrkConf: " << obj_meta->tracker_confidence;
-
-    // For non-selected objects, keep their default blue border color
-    obj_meta->rect_params.border_color = {0.0, 0.0, 1.0, 1.0};
-
-    std::string label_conf_str = ss_label_conf.str();
-
-    // Free previous display_text and set the new one
-    if (obj_meta->text_params.display_text)
-    {
-        g_free(obj_meta->text_params.display_text);
-        obj_meta->text_params.display_text = nullptr;
-    }
-    obj_meta->text_params.display_text = g_strdup(label_conf_str.c_str());
-
-    // Position text relative to the bounding box
-    obj_meta->text_params.x_offset = (guint)obj_meta->rect_params.left;
-    gint preferred_y_signed = (gint)(obj_meta->rect_params.top - 25);
-    if (preferred_y_signed < 0) { // If text would go off-screen upwards, push it below the box
-        obj_meta->text_params.y_offset = (guint)(obj_meta->rect_params.top + obj_meta->rect_params.height + 5);
-    } else {
-        obj_meta->text_params.y_offset = (guint)preferred_y_signed;
-    }
-
-    obj_meta->text_params.font_params.font_name = (gchar *)"Sans";
-    obj_meta->text_params.font_params.font_size = 12;
-    obj_meta->text_params.font_params.font_color = obj_meta->rect_params.border_color; // Match color to bbox
-    obj_meta->text_params.set_bg_clr = 0;                                               // No background box
-}
-
-/**
- * @brief Draws a reticule (crosshair) at a specified center point on the OSD.
- * @param batch_meta The NvDsBatchMeta for acquiring display metadata.
- * @param frame_meta The NvDsFrameMeta to add display metadata to.
- * @param center_x The X coordinate of the reticule's center.
- * @param center_y The Y coordinate of the reticule's center.
- * @param size The size (length of each arm) of the reticule.
- * @param color The color of the reticule.
- */
-void ObjectDetectionNode::draw_reticule(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta,
-                                       gfloat center_x, gfloat center_y, gfloat size, NvOSD_ColorParams color)
-{
-    NvDsDisplayMeta *reticule_display_meta = nvds_acquire_display_meta_from_pool(batch_meta);
-    if (reticule_display_meta)
-    {
-        reticule_display_meta->num_lines = 2; // Two lines for crosshair
-
-        // Horizontal line of the reticule
-        reticule_display_meta->line_params[0].x1 = (guint)(center_x - size / 2.0);
-        reticule_display_meta->line_params[0].y1 = (guint)center_y;
-        reticule_display_meta->line_params[0].x2 = (guint)(center_x + size / 2.0);
-        reticule_display_meta->line_params[0].y2 = (guint)center_y;
-        reticule_display_meta->line_params[0].line_width = 2;
-        reticule_display_meta->line_params[0].line_color = color;
-
-        // Vertical line of the reticule
-        reticule_display_meta->line_params[1].x1 = (guint)center_x;
-        reticule_display_meta->line_params[1].y1 = (guint)(center_y - size / 2.0);
-        reticule_display_meta->line_params[1].x2 = (guint)center_x;
-        reticule_display_meta->line_params[1].y2 = (guint)(center_y + size / 2.0);
-        reticule_display_meta->line_params[1].line_width = 2;
-        reticule_display_meta->line_params[1].line_color = color;
-
-        nvds_add_display_meta_to_frame(frame_meta, reticule_display_meta);
-    } else {
-        RCLCPP_WARN(this->get_logger(), "Failed to acquire display meta for reticule.");
-    }
-}
-
-/**
- * @brief Draws the KF-predicted bounding box, reticule, and associated text for the selected object.
- * This is called regardless of whether the object is currently detected or occluded.
- * @param batch_meta The NvDsBatchMeta for acquiring display metadata.
- * @param frame_meta The NvDsFrameMeta to add display metadata to.
- * @param predicted_vx Predicted X velocity for the selected object.
- * @param predicted_vy Predicted Y velocity for the selected object.
- */
-void ObjectDetectionNode::draw_selected_object_overlay(
-    NvDsBatchMeta *batch_meta,
-    NvDsFrameMeta *frame_meta,
-    double predicted_vx, double predicted_vy)
-{
-    // Use the KF's last known/predicted bounding box for drawing the overlay
-    NvOSD_RectParams &selected_rect_for_drawing = selected_object_last_bbox_;
-
-    gfloat center_x = selected_rect_for_drawing.left + selected_rect_for_drawing.width / 2.0;
-    gfloat center_y = selected_rect_for_drawing.top + selected_rect_for_drawing.height / 2.0;
-    gfloat reticule_size = 20.0;
-    NvOSD_ColorParams reticule_color = {1.0, 0.0, 0.0, 1.0}; // Red color for selected object's reticule
-
-    // Draw the reticule at the KF-predicted center
-    draw_reticule(batch_meta, frame_meta, center_x, center_y, reticule_size, reticule_color);
-
-    // Draw the KF-predicted bounding box
-    NvDsDisplayMeta *predicted_bbox_display_meta = nvds_acquire_display_meta_from_pool(batch_meta);
-    if (predicted_bbox_display_meta) {
-        predicted_bbox_display_meta->num_rects = 1;
-        predicted_bbox_display_meta->rect_params[0] = selected_rect_for_drawing;
-        predicted_bbox_display_meta->rect_params[0].border_color = {1.0, 0.0, 0.0, 1.0}; // Red border
-        predicted_bbox_display_meta->rect_params[0].border_width = 3;
-        predicted_bbox_display_meta->rect_params[0].has_bg_color = 0;
-        nvds_add_display_meta_to_frame(frame_meta, predicted_bbox_display_meta);
-    }
-
-    // Draw text with KF prediction info
-    NvDsDisplayMeta *kf_text_display_meta = nvds_acquire_display_meta_from_pool(batch_meta);
-    if (kf_text_display_meta) {
-        kf_text_display_meta->num_labels = 1;
-        std::stringstream kf_text_ss;
-        kf_text_ss << "ID: " << selected_object_id_
-                   << " Vx: " << std::fixed << std::setprecision(2) << predicted_vx
-                   << " Vy: " << std::fixed << std::setprecision(2) << predicted_vy;
-
-        // Add KF prediction frame count if object is currently lost by detector
-        if (selected_object_lost_frames_ > 0) {
-             kf_text_ss << " (KF:Pred " << selected_object_lost_frames_ << " fr)";
-        } else {
-            kf_text_ss << " (KF:Tracked)"; // Indicate it's currently tracked by KF
-        }
-
-        kf_text_display_meta->text_params[0].display_text = g_strdup(kf_text_ss.str().c_str());
-        kf_text_display_meta->text_params[0].x_offset = (guint)(selected_rect_for_drawing.left);
-        gint text_y_offset_signed = (gint)(selected_rect_for_drawing.top - 25);
-        if (text_y_offset_signed < 0) {
-            kf_text_display_meta->text_params[0].y_offset = (guint)(selected_rect_for_drawing.top + selected_rect_for_drawing.height + 5);
-        } else {
-            kf_text_display_meta->text_params[0].y_offset = (guint)text_y_offset_signed;
-        }
-        kf_text_display_meta->text_params[0].font_params.font_name = (gchar *)"Sans";
-        kf_text_display_meta->text_params[0].font_params.font_size = 12;
-        kf_text_display_meta->text_params[0].font_params.font_color = {1.0, 1.0, 1.0, 1.0}; // White text
-        kf_text_display_meta->text_params[0].set_bg_clr = 0;
-        nvds_add_display_meta_to_frame(frame_meta, kf_text_display_meta);
     }
 }
 

@@ -13,7 +13,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(PkgConfig REQUIRED)
-find_package(Eigen3 REQUIRED) # This finds Eigen and sets EIGEN3_INCLUDE_DIRS
+find_package(Eigen3 REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
 # Find GStreamer, GLib, and yaml-cpp
@@ -42,7 +42,8 @@ endif()
 # Build the C++ node executable
 add_executable(object_detection_node
   src/object_detection.cpp
-  src/kalman_filter_2d.cpp # <--- IMPORTANT: Added this line!
+  src/kalman_filter_2d.cpp
+  src/osd_renderer.cpp
 )
 
 # Add dependencies for your node
@@ -53,7 +54,7 @@ ament_target_dependencies(object_detection_node
   cv_bridge
   sensor_msgs
   image_transport
-  Eigen3 # Keep this here, it helps with ROS dependency tracking
+  Eigen3
 )
 
 # Add the include directories so the compiler can find all necessary headers
@@ -74,10 +75,6 @@ target_link_libraries(object_detection_node
   ${GST_NVDS_META_LIB}
   ${YAML_CPP_LIBRARIES}
   ${cv_bridge_LIBRARIES}
-  # Eigen is typically header-only, so explicit linking here is often not needed,
-  # but if you use Eigen's dense linear algebra features, it might be.
-  # If you encounter linking errors related to Eigen, uncomment the line below.
-  # ${Eigen3_LIBS} # Uncomment if you get Eigen linking errors
 )
 
 # Install targets

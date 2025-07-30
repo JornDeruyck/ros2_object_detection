@@ -31,6 +31,7 @@
 // Custom local includes
 #include "ros2_object_detection/kalman_filter_2d.hpp"
 #include "ros2_object_detection/constants.hpp"
+#include "ros2_object_detection/osd_renderer.hpp" // NEW: Include the OSD Renderer header
 
 // Forward declarations for GStreamer types.
 typedef struct _GstElement GstElement;
@@ -97,13 +98,6 @@ private:
     void cycle_selected_target(bool forward);
 
     /**
-     * @brief Calculates and updates the FPS display.
-     * @param batch_meta Pointer to the current NvDsBatchMeta.
-     * @param frame_meta Pointer to the current NvDsFrameMeta.
-     */
-    void update_and_display_fps(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta);
-
-    /**
      * @brief Populates a ROS 2 Detection2D message from DeepStream object metadata.
      * @param obj_meta Pointer to the NvDsObjectMeta to process.
      * @param detection_array_msg The ROS 2 Detection2DArray message to populate.
@@ -127,52 +121,6 @@ private:
         double &predicted_x, double &predicted_y,
         double &predicted_vx, double &predicted_vy);
     
-    /**
-     * @brief Draws a reticule (crosshair) at a specified center point on the OSD.
-     * @param batch_meta The NvDsBatchMeta for acquiring display metadata.
-     * @param frame_meta The NvDsFrameMeta to add display metadata to.
-     * @param center_x The X coordinate of the reticule's center.
-     * @param center_y The Y coordinate of the reticule's center.
-     * @param size The size (length of each arm) of the reticule.
-     * @param color The color of the reticule.
-     */
-    void draw_reticule(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta,
-                       gfloat center_x, gfloat center_y, gfloat size, NvOSD_ColorParams color);
-
-    /**
-     * @brief Applies OSD customization to a detected object's metadata.
-     * This includes setting border color, width, and text label.
-     * @param obj_meta The NvDsObjectMeta to modify.
-     * @param is_selected_and_kf_initialized True if this is the selected object AND its KF is initialized.
-     * @param predicted_vx Predicted X velocity for the selected object (0 for others).
-     * @param predicted_vy Predicted Y velocity for the selected object (0 for others).
-     * @param selected_object_found_in_frame True if the selected object was detected in the current frame.
-     */
-    void customize_object_osd(
-        NvDsObjectMeta *obj_meta,
-        bool is_selected_and_kf_initialized,
-        double predicted_vx, double predicted_vy,
-        bool selected_object_found_in_frame);
-
-    /**
-     * @brief Draws the KF-predicted bounding box, reticule, and associated text for the selected object.
-     * This is called regardless of whether the object is currently detected or occluded.
-     * @param batch_meta The NvDsBatchMeta for acquiring display metadata.
-     * @param frame_meta The NvDsFrameMeta to add display metadata to.
-     * @param predicted_vx Predicted X velocity for the selected object.
-     * @param predicted_vy Predicted Y velocity for the selected object.
-     */
-    void draw_selected_object_overlay(
-        NvDsBatchMeta *batch_meta,
-        NvDsFrameMeta *frame_meta,
-        double predicted_vx, double predicted_vy);
-
-    // --- Members for FPS calculation and display ---
-    std::chrono::steady_clock::time_point last_fps_update_time_; ///< Stores the last time FPS was updated.
-    unsigned int frame_counter_;                                  ///< Counts frames since last FPS update.
-    double current_fps_display_;                                  ///< Stores the calculated FPS value to be displayed.
-    std::mutex fps_mutex_;                                        ///< Mutex to protect FPS variables from concurrent access.
-
     // --- Members for target selection, highlighting, and custom tracking ---
     guint64 selected_object_id_;                                  ///< The ID of the currently selected object.
     std::map<guint64, NvOSD_RectParams> current_tracked_objects_; ///< Map of object_id to their last known bounding box (only for currently detected).
@@ -183,16 +131,18 @@ private:
     bool selected_object_kf_initialized_;                 ///< Flag to indicate if the KF for the selected object is initialized.
     unsigned int selected_object_lost_frames_;            ///< Counts frames the selected object has been out of view of the detector (used by KF).
 
-    // New member to store the last known bounding box (predicted or detected) for the selected object
+    // Member to store the last known bounding box (predicted or detected) for the selected object
     // This allows drawing the reticule even if the object is occluded.
     NvOSD_RectParams selected_object_last_bbox_;
 
-    // New member to track the DeepStream tracker's reported state for the selected object
+    // Member to track the DeepStream tracker's reported state for the selected object
     TRACKER_STATE selected_object_tracker_state_;
 
     // To prevent rapid cycling on button hold
     bool button0_pressed_prev_; ///< Previous state of joystick button 0.
     bool button1_pressed_prev_; ///< Previous state of joystick button 1.
+
+    std::unique_ptr<OSDRenderer> osd_renderer_; ///< Manages all OSD drawing.
 };
 
 #endif // OBJECT_DETECTION_HPP
