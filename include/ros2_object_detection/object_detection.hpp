@@ -1,3 +1,4 @@
+// include/ros2_object_detection/object_detection.hpp
 #ifndef OBJECT_DETECTION_HPP
 #define OBJECT_DETECTION_HPP
 
@@ -28,65 +29,22 @@
 #include "nvds_tracker_meta.h" // FOR TRACKER_STATE enum and NVDS_TRACKER_METADATA
 
 // YAML parsing (used in .cpp, but good to note dependency)
-#include <yaml-cpp/yaml.h>
+// #include <yaml-cpp/yaml.h> // Not directly needed in header, only in .cpp
 
 // OpenCV (not explicitly used for OSD, but good to keep if needed for image processing elsewhere)
-#include <opencv2/opencv.hpp>
+// #include <opencv2/opencv.hpp> // Not directly needed in header, only in .cpp
 
-// Eigen for Kalman Filter
-#include <Eigen/Dense> // For MatrixXd, VectorXd
-
-// Define a constant for an untracked/unselected object ID.
-#ifndef UNTRACKED_OBJECT_ID
-#define UNTRACKED_OBJECT_ID G_MAXUINT64 // Using G_MAXUINT64 from glib.h for a clear "untracked" state
-#endif
+// Custom local includes
+#include "ros2_object_detection/kalman_filter_2d.hpp"
+#include "ros2_object_detection/constants.hpp"
 
 // Forward declarations for GStreamer types.
 typedef struct _GstElement GstElement;
 typedef struct _GstPad GstPad;
 typedef struct _GstPadProbeInfo GstPadProbeInfo;
-
-/**
- * @brief Simple 2D Kalman Filter for constant velocity model.
- * State: [x, y, vx, vy]
- * Measurement: [x, y]
- */
-class KalmanFilter2D {
-public:
-    Eigen::MatrixXd A; // State transition matrix
-    Eigen::MatrixXd H; // Measurement matrix
-    Eigen::MatrixXd Q; // Process noise covariance
-    Eigen::MatrixXd R; // Measurement noise covariance
-    Eigen::MatrixXd P; // Error covariance matrix
-    Eigen::VectorXd x_hat; // State estimate [x, y, vx, vy]
-
-    KalmanFilter2D(); // Constructor initializes matrices
-
-    /**
-     * @brief Initializes the filter state and covariance for a new track.
-     * @param x Initial x position.
-     * @param y Initial y position.
-     */
-    void init(double x, double y);
-
-    /**
-     * @brief Predicts the next state.
-     */
-    void predict();
-
-    /**
-     * @brief Updates the state with a new measurement.
-     * @param measured_x Measured x position.
-     * @param measured_y Measured y position.
-     */
-    void update(double measured_x, double measured_y);
-
-    double getX() const { return x_hat(0); }
-    double getY() const { return x_hat(1); }
-    double getVx() const { return x_hat(2); }
-    double getVy() const { return x_hat(3); }
-};
-
+typedef struct _NvDsFrameMeta NvDsFrameMeta;
+typedef struct _NvDsBatchMeta NvDsBatchMeta;
+typedef struct _NvDsObjectMeta NvDsObjectMeta;
 
 /**
  * @class ObjectDetectionNode
@@ -111,12 +69,6 @@ public:
      * Cleans up GStreamer resources and stops threads.
      */
     ~ObjectDetectionNode();
-
-    /**
-     * @brief Cycles through detected targets (forward or backward).
-     * @param forward If true, cycles to the next target; otherwise, cycles to the previous.
-     */
-    void cycle_selected_target(bool forward);
 
 private:
     // --- GStreamer related members ---
@@ -143,6 +95,72 @@ private:
      * @param msg The received joystick message.
      */
     void joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg);
+
+    /**
+     * @brief Cycles through detected targets (forward or backward).
+     * @param forward If true, cycles to the next target; otherwise, cycles to the previous.
+     */
+    void cycle_selected_target(bool forward);
+
+    /**
+     * @brief Calculates and updates the FPS display.
+     * @param batch_meta Pointer to the current NvDsBatchMeta.
+     * @param frame_meta Pointer to the current NvDsFrameMeta.
+     */
+    void update_and_display_fps(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta); // Modified signature
+
+    /**
+     * @brief Processes an individual DeepStream object meta, populating ROS detections and storing tracked objects.
+     * @param obj_meta Pointer to the NvDsObjectMeta to process.
+     * @param detection_array_msg The ROS 2 Detection2DArray message to populate.
+     * @return True if the processed object is the currently selected object, false otherwise.
+     */
+    bool process_object_meta(NvDsObjectMeta *obj_meta, vision_msgs::msg::Detection2DArray &detection_array_msg);
+
+    /**
+     * @brief Manages the Kalman Filter for the selected object, including prediction, update, and deselection logic.
+     * @param selected_object_found_in_frame True if the selected object was detected in the current frame.
+     * @param current_selected_bbox_detected The detected bounding box of the selected object, if found.
+     * @param current_selected_obj_meta_ptr Pointer to the NvDsObjectMeta of the selected object, if found.
+     * @param[out] predicted_x The predicted X coordinate from the KF.
+     * @param[out] predicted_y The predicted Y coordinate from the KF.
+     * @param[out] predicted_vx The predicted X velocity from the KF.
+     * @param[out] predicted_vy The predicted Y velocity from the KF.
+     */
+    void manage_selected_object_kalman_filter(
+        bool selected_object_found_in_frame,
+        const NvOSD_RectParams &current_selected_bbox_detected,
+        NvDsObjectMeta *current_selected_obj_meta_ptr,
+        double &predicted_x, double &predicted_y,
+        double &predicted_vx, double &predicted_vy);
+
+    /**
+     * @brief Applies OSD customization to a detected object's metadata.
+     * This includes setting border color, width, and text label.
+     * @param obj_meta The NvDsObjectMeta to modify.
+     * @param is_selected True if this is the selected object.
+     * @param predicted_vx Predicted X velocity for the selected object (0 for others).
+     * @param predicted_vy Predicted Y velocity for the selected object (0 for others).
+     * @param selected_object_found_in_frame True if the selected object was detected.
+     */
+    void customize_object_osd(
+        NvDsObjectMeta *obj_meta,
+        bool is_selected,
+        double predicted_vx, double predicted_vy,
+        bool selected_object_found_in_frame);
+
+    /**
+     * @brief Draws a reticule and predicted bounding box for the selected object using NvDsDisplayMeta.
+     * This is used when the object is selected but not currently detected by the primary detector.
+     * @param batch_meta The NvDsBatchMeta for acquiring display metadata.
+     * @param frame_meta The NvDsFrameMeta to add display metadata to.
+     * @param predicted_vx Predicted X velocity for the selected object.
+     * @param predicted_vy Predicted Y velocity for the selected object.
+     */
+    void draw_selected_object_overlay_if_occluded(
+        NvDsBatchMeta *batch_meta,
+        NvDsFrameMeta *frame_meta,
+        double predicted_vx, double predicted_vy);
 
     // --- Members for FPS calculation and display ---
     std::chrono::steady_clock::time_point last_fps_update_time_; ///< Stores the last time FPS was updated.

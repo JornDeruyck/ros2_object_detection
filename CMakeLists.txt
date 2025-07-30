@@ -40,7 +40,10 @@ if(NOT GST_NVDS_META_LIB)
 endif()
 
 # Build the C++ node executable
-add_executable(object_detection_node src/object_detection.cpp)
+add_executable(object_detection_node
+  src/object_detection.cpp
+  src/kalman_filter_2d.cpp # <--- IMPORTANT: Added this line!
+)
 
 # Add dependencies for your node
 ament_target_dependencies(object_detection_node
@@ -60,7 +63,7 @@ target_include_directories(object_detection_node PUBLIC
   ${GLIB_INCLUDE_DIRS}
   /opt/nvidia/deepstream/deepstream/sources/includes/
   ${YAML_CPP_INCLUDE_DIRS}
-  ${EIGEN3_INCLUDE_DIRS} # <-- ADDED THIS LINE FOR EIGEN HEADERS
+  ${EIGEN3_INCLUDE_DIRS}
 )
 
 # Link against all required libraries
@@ -71,9 +74,10 @@ target_link_libraries(object_detection_node
   ${GST_NVDS_META_LIB}
   ${YAML_CPP_LIBRARIES}
   ${cv_bridge_LIBRARIES}
-  # Eigen is typically header-only, so explicit linking here is often not needed.
-  # If you encounter linking errors later, you might need to add:
-  # ${EIGEN3_LIBS}
+  # Eigen is typically header-only, so explicit linking here is often not needed,
+  # but if you use Eigen's dense linear algebra features, it might be.
+  # If you encounter linking errors related to Eigen, uncomment the line below.
+  # ${Eigen3_LIBS} # Uncomment if you get Eigen linking errors
 )
 
 # Install targets
