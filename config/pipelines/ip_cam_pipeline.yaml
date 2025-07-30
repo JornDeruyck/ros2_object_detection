@@ -1,10 +1,8 @@
 pipeline: >
-  rtspsrc location="rtsp://admin:226419@10.37.1.226:554/live2.sdp" latency=200 !
+  rtspsrc location="rtsp://syno:edde86368105915a36fbedcb446671bc@10.37.1.151:554/Sms=6.unicast" latency=200 protocols=tcp !
   rtph264depay ! 
   h264parse ! 
-  avdec_h264 !
-  nvvideoconvert !
-  video/x-raw(memory:NVMM), format=NV12 !
+  nvv4l2decoder !
   mux.sink_0 nvstreammux name=mux batch-size=1 width=1280 height=720 !
   nvinfer name=pgie_0 config-file-path=inference/pgie_yolov11_config.txt !
   nvtracker ll-lib-file=/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so ll-config-file=tracking/tracker_config.yaml !

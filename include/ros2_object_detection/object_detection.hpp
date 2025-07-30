@@ -9,6 +9,7 @@
 #include <thread> // For std::thread
 #include <vector> // For storing object IDs
 #include <memory> // For std::unique_ptr
+#include <string> // For std::string (used by ROS parameters)
 
 // GStreamer & GLib includes
 #include <glib.h>
@@ -31,7 +32,7 @@
 // Custom local includes
 #include "ros2_object_detection/kalman_filter_2d.hpp"
 #include "ros2_object_detection/constants.hpp"
-#include "ros2_object_detection/osd_renderer.hpp" // NEW: Include the OSD Renderer header
+#include "ros2_object_detection/osd_renderer.hpp"
 
 // Forward declarations for GStreamer types.
 typedef struct _GstElement GstElement;
@@ -142,7 +143,11 @@ private:
     bool button0_pressed_prev_; ///< Previous state of joystick button 0.
     bool button1_pressed_prev_; ///< Previous state of joystick button 1.
 
+    // OSD Renderer instance
     std::unique_ptr<OSDRenderer> osd_renderer_; ///< Manages all OSD drawing.
+
+    // NEW: Parameter for class filtering
+    std::vector<long int> allowed_class_ids_; ///< List of class IDs to allow for detection and tracking. Changed from int to long int.
 };
 
 #endif // OBJECT_DETECTION_HPP

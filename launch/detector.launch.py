@@ -5,7 +5,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     pkg_share_dir = get_package_share_directory('ros2_object_detection')
-    config_file = os.path.join(pkg_share_dir, 'config', 'pipelines', 'usb_cam_pipeline.yaml')
+    config_file = os.path.join(pkg_share_dir, 'config', 'pipelines', 'ip_cam_pipeline.yaml')
 
     # This is the directory where your config files are installed
     config_dir = os.path.join(pkg_share_dir, 'config')

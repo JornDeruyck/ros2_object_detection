@@ -2,7 +2,7 @@
 #include "ros2_object_detection/object_detection.hpp"
 #include "ros2_object_detection/kalman_filter_2d.hpp"
 #include "ros2_object_detection/constants.hpp"
-#include "ros2_object_detection/osd_renderer.hpp" // NEW: Include the OSD Renderer
+#include "ros2_object_detection/osd_renderer.hpp"
 
 // Standard C++ includes
 #include <algorithm>
@@ -122,11 +122,39 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
         NvOSD_RectParams current_selected_bbox_detected = {}; // Initialize with default values
         NvDsObjectMeta *current_selected_obj_meta_ptr = nullptr;
 
-        // First pass: Process all detected objects, populate ROS message, and identify selected one if present
+        // First pass: Process all detected objects, filter by class, populate ROS message, and identify selected one if present
         for (GList *l_obj = frame_meta->obj_meta_list; l_obj != nullptr; l_obj = l_obj->next)
         {
             NvDsObjectMeta *obj_meta = (NvDsObjectMeta *)l_obj->data;
             if (!obj_meta) continue;
+
+            // --- NEW: Class Filtering Logic ---
+            bool is_allowed_class = false;
+            if (node->allowed_class_ids_.empty()) {
+                // If allowed_class_ids_ is empty, allow all classes
+                is_allowed_class = true;
+            } else {
+                // Check if the object's class ID is in the allowed list
+                for (int allowed_id : node->allowed_class_ids_) {
+                    if (obj_meta->class_id == allowed_id) {
+                        is_allowed_class = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!is_allowed_class) {
+                // If this object's class is not allowed, skip it entirely.
+                // Also, clear its OSD properties to prevent it from being drawn by DeepStream's default OSD.
+                obj_meta->rect_params.border_width = 0;
+                obj_meta->rect_params.has_bg_color = 0;
+                if (obj_meta->text_params.display_text) {
+                    g_free(obj_meta->text_params.display_text);
+                    obj_meta->text_params.display_text = nullptr;
+                }
+                continue; // Skip processing this object further
+            }
+            // --- END NEW: Class Filtering Logic ---
 
             node->current_tracked_objects_[obj_meta->object_id] = obj_meta->rect_params;
             node->populate_ros_detection_message(obj_meta, detection_array_msg);
@@ -138,17 +166,14 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
                 current_selected_obj_meta_ptr = obj_meta;
 
                 // For the selected object, we will explicitly manage its OSD later.
-                // For now, clear its default text to prevent overlap.
+                // For now, clear its default text and border to prevent overlap/double drawing.
                 if (obj_meta->text_params.display_text) {
                     g_free(obj_meta->text_params.display_text);
                     obj_meta->text_params.display_text = nullptr;
                 }
-                // Set border to 0 width for selected object if it's detected,
-                // so we can draw our own custom bounding box (or let DeepStream draw it with red)
-                // based on the logic in OSD_Renderer.
-                obj_meta->rect_params.border_width = 0;
+                obj_meta->rect_params.border_width = 0; // Make DeepStream's box invisible for selected object
             } else {
-                // For non-selected objects, apply standard OSD
+                // For non-selected objects that passed the class filter, apply standard OSD
                 if (node->osd_renderer_) {
                     node->osd_renderer_->render_non_selected_object_osd(obj_meta);
                 }
@@ -208,6 +233,25 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
     this->declare_parameter<std::string>("pipeline_config", "");
     auto config_path = this->get_parameter("pipeline_config").as_string();
 
+    // NEW: Declare and retrieve allowed_class_ids parameter
+    this->declare_parameter<std::vector<int>>("allowed_class_ids", std::vector<int>());
+    allowed_class_ids_ = this->get_parameter("allowed_class_ids").as_integer_array();
+    if (allowed_class_ids_.empty()) {
+        RCLCPP_INFO(this->get_logger(), "No specific class IDs provided for filtering. All detected classes will be processed.");
+    } else {
+        std::stringstream ss;
+        ss << "Filtering for class IDs: [";
+        for (size_t i = 0; i < allowed_class_ids_.size(); ++i) {
+            ss << allowed_class_ids_[i];
+            if (i < allowed_class_ids_.size() - 1) {
+                ss << ", ";
+            }
+        }
+        ss << "]";
+        RCLCPP_INFO(this->get_logger(), "%s", ss.str().c_str());
+    }
+
+
     if (config_path.empty()) {
         RCLCPP_FATAL(this->get_logger(), "Parameter 'pipeline_config' is not set. Please provide a path to the YAML config file.");
         throw std::runtime_error("Missing 'pipeline_config' parameter.");
@@ -239,7 +283,6 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
         "/joy", 10, std::bind(&ObjectDetectionNode::joy_callback, this, std::placeholders::_1));
     RCLCPP_INFO(this->get_logger(), "Subscribing to /joy topic for joystick input.");
 
-    // NEW: Initialize OSD Renderer
     osd_renderer_ = std::make_unique<OSDRenderer>();
 
     gst_init(nullptr, nullptr);
