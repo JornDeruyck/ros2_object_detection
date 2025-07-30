@@ -28,12 +28,6 @@
 #include "nvll_osd_struct.h" // For NvOSD_TextParams, NvOSD_RectParams, NvOSD_LineParams etc.
 #include "nvds_tracker_meta.h" // FOR TRACKER_STATE enum and NVDS_TRACKER_METADATA
 
-// YAML parsing (used in .cpp, but good to note dependency)
-// #include <yaml-cpp/yaml.h> // Not directly needed in header, only in .cpp
-
-// OpenCV (not explicitly used for OSD, but good to keep if needed for image processing elsewhere)
-// #include <opencv2/opencv.hpp> // Not directly needed in header, only in .cpp
-
 // Custom local includes
 #include "ros2_object_detection/kalman_filter_2d.hpp"
 #include "ros2_object_detection/constants.hpp"
@@ -107,15 +101,14 @@ private:
      * @param batch_meta Pointer to the current NvDsBatchMeta.
      * @param frame_meta Pointer to the current NvDsFrameMeta.
      */
-    void update_and_display_fps(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta); // Modified signature
+    void update_and_display_fps(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta);
 
     /**
-     * @brief Processes an individual DeepStream object meta, populating ROS detections and storing tracked objects.
+     * @brief Populates a ROS 2 Detection2D message from DeepStream object metadata.
      * @param obj_meta Pointer to the NvDsObjectMeta to process.
      * @param detection_array_msg The ROS 2 Detection2DArray message to populate.
-     * @return True if the processed object is the currently selected object, false otherwise.
      */
-    bool process_object_meta(NvDsObjectMeta *obj_meta, vision_msgs::msg::Detection2DArray &detection_array_msg);
+    void populate_ros_detection_message(NvDsObjectMeta *obj_meta, vision_msgs::msg::Detection2DArray &detection_array_msg);
 
     /**
      * @brief Manages the Kalman Filter for the selected object, including prediction, update, and deselection logic.
@@ -133,31 +126,43 @@ private:
         NvDsObjectMeta *current_selected_obj_meta_ptr,
         double &predicted_x, double &predicted_y,
         double &predicted_vx, double &predicted_vy);
+    
+    /**
+     * @brief Draws a reticule (crosshair) at a specified center point on the OSD.
+     * @param batch_meta The NvDsBatchMeta for acquiring display metadata.
+     * @param frame_meta The NvDsFrameMeta to add display metadata to.
+     * @param center_x The X coordinate of the reticule's center.
+     * @param center_y The Y coordinate of the reticule's center.
+     * @param size The size (length of each arm) of the reticule.
+     * @param color The color of the reticule.
+     */
+    void draw_reticule(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta,
+                       gfloat center_x, gfloat center_y, gfloat size, NvOSD_ColorParams color);
 
     /**
      * @brief Applies OSD customization to a detected object's metadata.
      * This includes setting border color, width, and text label.
      * @param obj_meta The NvDsObjectMeta to modify.
-     * @param is_selected True if this is the selected object.
+     * @param is_selected_and_kf_initialized True if this is the selected object AND its KF is initialized.
      * @param predicted_vx Predicted X velocity for the selected object (0 for others).
      * @param predicted_vy Predicted Y velocity for the selected object (0 for others).
-     * @param selected_object_found_in_frame True if the selected object was detected.
+     * @param selected_object_found_in_frame True if the selected object was detected in the current frame.
      */
     void customize_object_osd(
         NvDsObjectMeta *obj_meta,
-        bool is_selected,
+        bool is_selected_and_kf_initialized,
         double predicted_vx, double predicted_vy,
         bool selected_object_found_in_frame);
 
     /**
-     * @brief Draws a reticule and predicted bounding box for the selected object using NvDsDisplayMeta.
-     * This is used when the object is selected but not currently detected by the primary detector.
+     * @brief Draws the KF-predicted bounding box, reticule, and associated text for the selected object.
+     * This is called regardless of whether the object is currently detected or occluded.
      * @param batch_meta The NvDsBatchMeta for acquiring display metadata.
      * @param frame_meta The NvDsFrameMeta to add display metadata to.
      * @param predicted_vx Predicted X velocity for the selected object.
      * @param predicted_vy Predicted Y velocity for the selected object.
      */
-    void draw_selected_object_overlay_if_occluded(
+    void draw_selected_object_overlay(
         NvDsBatchMeta *batch_meta,
         NvDsFrameMeta *frame_meta,
         double predicted_vx, double predicted_vy);

@@ -17,6 +17,7 @@ def generate_launch_description():
             name='object_detection_node',
             output='screen',
             parameters=[{'pipeline_config': config_file}],
-            cwd=config_dir
+            cwd=config_dir,
+            arguments=['--ros-args', '--log-level', 'info']
         )
     ])

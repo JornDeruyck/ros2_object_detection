@@ -75,7 +75,7 @@ DataAssociator:
   minMatchingScore4TentativeIou: 0.5296    # Min iou threshold to match targets and tentative detection
 
 StateEstimator:
-  stateEstimatorType: 2    # the type of state estimator among { DUMMY=0, SIMPLE=1, REGULAR=2 }
+  stateEstimatorType: 2    # Type of state estimator among { DUMMY=0, SIMPLE=1, REGULAR=2, SIMPLE_LOC=3 }
 
   # [Dynamics Modeling]
   processNoiseVar4Loc: 6810.8668    # Process noise variance for bbox center
@@ -98,10 +98,10 @@ VisualTracker:
   filterChannelWeightsLr: 0.1000    # learning rate for the channel weights among feature channels. Valid Range: [0.0, 1.0]
   gaussianSigma: 0.7500    # Standard deviation for Gaussian for desired response when creating DCF filter [pixels]
 
-Object Model Projection:
+ObjectModelProjection:
   cameraModelFilepath: ""
   outputVisibility: 1        # <-- IMPORTANT: Change from 0 to 1
   outputFootLocation: 0
-  outputConvexHull: 1
+  outputConvexHull: 0
   maxConvexHullSize: 15
 
