@@ -299,22 +299,22 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
         throw std::runtime_error("GStreamer pipeline parsing failed.");
     }
 
-    GstElement *osd_element = gst_bin_get_by_name(GST_BIN(pipeline_), "nvdsosd_0");
+    GstElement *osd_element = gst_bin_get_by_name(GST_BIN(pipeline_), "nvdsosd0");
     if (osd_element)
     {
         GstPad *osd_sink_pad = gst_element_get_static_pad(osd_element, "sink");
         if (osd_sink_pad) {
             gst_pad_add_probe(osd_sink_pad, GST_PAD_PROBE_TYPE_BUFFER, osd_probe_callback, this, nullptr);
             gst_object_unref(osd_sink_pad);
-            RCLCPP_INFO(this->get_logger(), "Attached OSD probe to 'nvdsosd_0' sink pad.");
+            RCLCPP_INFO(this->get_logger(), "Attached OSD probe to 'nvdsosd0' sink pad.");
         } else {
-            RCLCPP_WARN(this->get_logger(), "Could not get sink pad from 'nvdsosd_0' element for probe attachment. Custom OSD will not function.");
+            RCLCPP_WARN(this->get_logger(), "Could not get sink pad from 'nvdsosd0' element for probe attachment. Custom OSD will not function.");
         }
         gst_object_unref(osd_element);
     }
     else
     {
-        RCLCPP_WARN(this->get_logger(), "Could not find 'nvdsosd_0' element in pipeline. Custom OSD will not be rendered.");
+        RCLCPP_WARN(this->get_logger(), "Could not find 'nvdsosd0' element in pipeline. Custom OSD will not be rendered.");
     }
 
     GstElement *appsink = gst_bin_get_by_name(GST_BIN(pipeline_), "ros_sink");

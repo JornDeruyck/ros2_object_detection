@@ -14,11 +14,11 @@ object_detection_node:
       mux.sink_0 nvstreammux name=mux batch-size=1 width=1280 height=720 !
       nvinfer name=pgie_0 config-file-path=config/inference/pgie_yolov11_config.txt !
       nvtracker ll-lib-file=/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so ll-config-file=config/tracking/tracker_config.yaml !
-      nvdsosd name=nvdsosd_0 !
+      nvdsosd name=nvdsosd0 !
       nvvideoconvert !
       video/x-raw, format=BGRx !
       videoconvert !
-      jpegenc !
+      jpegenc quality=50 !
       appsink name=ros_sink emit-signals=true sync=false
 
     # Object Class Filtering
