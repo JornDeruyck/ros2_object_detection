@@ -4,10 +4,10 @@
 gpu-id=0
 net-scale-factor=0.0039215697906911373
 model-color-format=0
-onnx-file=/home/jorn-deruyck/ros2/src/ros2_object_detection/models/yolov11l.onnx
+onnx-file=../../models/yolov11l.onnx
 
-model-engine-file=/var/tmp/engines/yolov11l.onnx_b1_gpu0_fp32.engine
-labelfile-path=/home/jorn-deruyck/ros2/src/ros2_object_detection/models/labels.txt
+model-engine-file=../yolov11l_b1_gpu0_fp32.engine
+labelfile-path=../../models/labels.txt
 batch-size=1
 network-mode=0 # 0=FP32, 1=INT8, 2=FP16 (Keep FP32 as per the previous working config)
 num-detected-classes=80

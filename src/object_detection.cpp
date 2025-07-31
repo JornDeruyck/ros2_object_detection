@@ -13,6 +13,7 @@
 #include <string>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 // GStreamer & GLib includes
 #include <gst/app/gstappsink.h>
@@ -31,9 +32,6 @@
 #include "vision_msgs/msg/detection2_d.hpp"
 #include "vision_msgs/msg/detection2_d_array.hpp"
 #include "vision_msgs/msg/object_hypothesis_with_pose.hpp"
-
-// YAML parsing
-#include <yaml-cpp/yaml.h>
 
 // OpenCV (not explicitly used for OSD, but good to keep if needed for image processing elsewhere)
 #include <opencv2/opencv.hpp>
@@ -105,16 +103,6 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
             node->osd_renderer_->update_and_display_fps(batch_meta, frame_meta);
         }
 
-        // --- DEBUG SNIPPET: Inspect Frame-Level User Metadata ---
-        RCLCPP_DEBUG(node->get_logger(), "Frame ID %u: %s. Iterating through frame user metadata:",
-                     frame_meta->frame_num,
-                     frame_meta->frame_user_meta_list == nullptr ? "frame_user_meta_list is NULL" : "frame_user_meta_list is NOT NULL");
-        for (GList *l_frame_user_meta = frame_meta->frame_user_meta_list; l_frame_user_meta != nullptr; l_frame_user_meta = l_frame_user_meta->next) {
-            NvDsUserMeta *user_meta = (NvDsUserMeta *)l_frame_user_meta->data;
-            RCLCPP_DEBUG(node->get_logger(), "  Found frame user meta type: %d", user_meta->base_meta.meta_type);
-        }
-        // --- END DEBUG SNIPPET ---
-
         std::lock_guard<std::mutex> objects_lock(node->tracked_objects_mutex_);
         node->current_tracked_objects_.clear(); // Clear detected objects from previous frame
 
@@ -128,7 +116,7 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
             NvDsObjectMeta *obj_meta = (NvDsObjectMeta *)l_obj->data;
             if (!obj_meta) continue;
 
-            // --- NEW: Class Filtering Logic ---
+            // --- Class Filtering Logic ---
             bool is_allowed_class = false;
             if (node->allowed_class_ids_.empty()) {
                 // If allowed_class_ids_ is empty, allow all classes
@@ -145,16 +133,15 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
 
             if (!is_allowed_class) {
                 // If this object's class is not allowed, skip it entirely.
-                // Also, clear its OSD properties to prevent it from being drawn by DeepStream's default OSD.
                 obj_meta->rect_params.border_width = 0;
                 obj_meta->rect_params.has_bg_color = 0;
                 if (obj_meta->text_params.display_text) {
                     g_free(obj_meta->text_params.display_text);
                     obj_meta->text_params.display_text = nullptr;
                 }
-                continue; // Skip processing this object further
+                continue;
             }
-            // --- END NEW: Class Filtering Logic ---
+            // --- END Class Filtering Logic ---
 
             node->current_tracked_objects_[obj_meta->object_id] = obj_meta->rect_params;
             node->populate_ros_detection_message(obj_meta, detection_array_msg);
@@ -166,12 +153,11 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
                 current_selected_obj_meta_ptr = obj_meta;
 
                 // For the selected object, we will explicitly manage its OSD later.
-                // For now, clear its default text and border to prevent overlap/double drawing.
                 if (obj_meta->text_params.display_text) {
                     g_free(obj_meta->text_params.display_text);
                     obj_meta->text_params.display_text = nullptr;
                 }
-                obj_meta->rect_params.border_width = 0; // Make DeepStream's box invisible for selected object
+                obj_meta->rect_params.border_width = 0;
             } else {
                 // For non-selected objects that passed the class filter, apply standard OSD
                 if (node->osd_renderer_) {
@@ -191,7 +177,6 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
             predicted_x, predicted_y, predicted_vx, predicted_vy);
 
         // After processing all objects and updating KF, render OSD for the selected object if one is active.
-        // This call happens OUTSIDE the object iteration loop, ensuring it's always drawn if selected.
         if (node->selected_object_id_ != UNTRACKED_OBJECT_ID && node->osd_renderer_) {
             node->osd_renderer_->render_selected_object_osd(
                 batch_meta,
@@ -203,8 +188,8 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
                 node->selected_object_tracker_state_,
                 predicted_vx,
                 predicted_vy,
-                selected_object_found_in_frame, // Pass whether the selected object was detected in this frame
-                current_selected_obj_meta_ptr   // Pass the actual NvDsObjectMeta if detected
+                selected_object_found_in_frame,
+                current_selected_obj_meta_ptr
             );
         }
     } // End of frame loop
@@ -220,27 +205,53 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
 // --- Constructor ---
 ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
     : Node("object_detection_node", options),
+      pipeline_(nullptr),
+      main_loop_(nullptr),
       selected_object_id_(UNTRACKED_OBJECT_ID),
+      selected_object_kf_(nullptr),
       selected_object_kf_initialized_(false),
       selected_object_lost_frames_(0),
       selected_object_tracker_state_(EMPTY),
       button0_pressed_prev_(false),
       button1_pressed_prev_(false)
 {
-    // Initialize selected_object_last_bbox_ with zero values
+    RCLCPP_INFO(this->get_logger(), "Initializing ObjectDetectionNode...");
+
     memset(&selected_object_last_bbox_, 0, sizeof(NvOSD_RectParams));
 
-    this->declare_parameter<std::string>("pipeline_config", "");
-    auto config_path = this->get_parameter("pipeline_config").as_string();
-
-    // NEW: Declare and retrieve allowed_class_ids parameter
+    // 1. Declare ALL Parameters
+    this->declare_parameter<std::string>("pipeline_string", "");
     this->declare_parameter<std::vector<int>>("allowed_class_ids", std::vector<int>());
+    this->declare_parameter<std::string>("detection_topic", "detections");
+    this->declare_parameter<std::string>("image_topic", "image_raw/compressed");
+    this->declare_parameter<std::string>("joy_topic", "/joy");
+    this->declare_parameter<bool>("use_qos_reliable", true);
+    this->declare_parameter<int>("qos_history_depth", 1);
+
+
+    // 2. Retrieve Parameter Values
+    std::string pipeline_string = this->get_parameter("pipeline_string").as_string();
     allowed_class_ids_ = this->get_parameter("allowed_class_ids").as_integer_array();
+    std::string detection_topic = this->get_parameter("detection_topic").as_string();
+    std::string image_topic = this->get_parameter("image_topic").as_string();
+    std::string joy_topic = this->get_parameter("joy_topic").as_string();
+    bool use_qos_reliable = this->get_parameter("use_qos_reliable").as_bool();
+    int qos_history_depth = this->get_parameter("qos_history_depth").as_int();
+
+    // Log the loaded parameters
+    RCLCPP_INFO(this->get_logger(), "Loaded Parameters:");
+    RCLCPP_INFO(this->get_logger(), "  pipeline_string: %s", pipeline_string.c_str());
+    RCLCPP_INFO(this->get_logger(), "  detection_topic: %s", detection_topic.c_str());
+    RCLCPP_INFO(this->get_logger(), "  image_topic: %s", image_topic.c_str());
+    RCLCPP_INFO(this->get_logger(), "  joy_topic: %s", joy_topic.c_str());
+    RCLCPP_INFO(this->get_logger(), "  use_qos_reliable: %s", use_qos_reliable ? "true" : "false");
+    RCLCPP_INFO(this->get_logger(), "  qos_history_depth: %d", qos_history_depth);
+
     if (allowed_class_ids_.empty()) {
-        RCLCPP_INFO(this->get_logger(), "No specific class IDs provided for filtering. All detected classes will be processed.");
+        RCLCPP_INFO(this->get_logger(), "  allowed_class_ids: (empty - all classes allowed)");
     } else {
         std::stringstream ss;
-        ss << "Filtering for class IDs: [";
+        ss << "  allowed_class_ids: [";
         for (size_t i = 0; i < allowed_class_ids_.size(); ++i) {
             ss << allowed_class_ids_[i];
             if (i < allowed_class_ids_.size() - 1) {
@@ -251,45 +262,36 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
         RCLCPP_INFO(this->get_logger(), "%s", ss.str().c_str());
     }
 
-
-    if (config_path.empty()) {
-        RCLCPP_FATAL(this->get_logger(), "Parameter 'pipeline_config' is not set. Please provide a path to the YAML config file.");
-        throw std::runtime_error("Missing 'pipeline_config' parameter.");
+    if (pipeline_string.empty()) {
+        RCLCPP_FATAL(this->get_logger(), "Parameter 'pipeline_string' is empty. Please provide a GStreamer pipeline string.");
+        throw std::runtime_error("Empty 'pipeline_string' parameter.");
     }
 
-    YAML::Node config;
-    try {
-        config = YAML::LoadFile(config_path);
-    } catch (const YAML::BadFile &e) {
-        RCLCPP_FATAL(this->get_logger(), "Failed to load YAML config file '%s': %s", config_path.c_str(), e.what());
-        throw;
-    } catch (const YAML::Exception &e) {
-        RCLCPP_FATAL(this->get_logger(), "Error parsing YAML config file '%s': %s", config_path.c_str(), e.what());
-        throw;
+    // Configure QoS profile based on parameters
+    rclcpp::QoS qos_profile = rclcpp::QoS(rclcpp::KeepLast(qos_history_depth));
+    if (use_qos_reliable) {
+        qos_profile.reliable();
+    } else {
+        qos_profile.best_effort();
     }
+    qos_profile.durability_volatile();
 
-    std::string pipeline_str = config["pipeline"].as<std::string>();
-    if (pipeline_str.empty()) {
-        RCLCPP_FATAL(this->get_logger(), "GStreamer pipeline string is empty in config file '%s'.", config_path.c_str());
-        throw std::runtime_error("Empty GStreamer pipeline string.");
-    }
-
-    rclcpp::QoS qos_profile = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile();
-
-    detection_publisher_ = this->create_publisher<vision_msgs::msg::Detection2DArray>("detections", qos_profile);
-    compressed_publisher_ = this->create_publisher<sensor_msgs::msg::CompressedImage>("image_raw/compressed", qos_profile);
+    detection_publisher_ = this->create_publisher<vision_msgs::msg::Detection2DArray>(detection_topic, qos_profile);
+    compressed_publisher_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(image_topic, qos_profile);
 
     joy_subscription_ = this->create_subscription<sensor_msgs::msg::Joy>(
-        "/joy", 10, std::bind(&ObjectDetectionNode::joy_callback, this, std::placeholders::_1));
-    RCLCPP_INFO(this->get_logger(), "Subscribing to /joy topic for joystick input.");
+        joy_topic, 10, std::bind(&ObjectDetectionNode::joy_callback, this, std::placeholders::_1));
+    RCLCPP_INFO(this->get_logger(), "Subscribing to %s topic for joystick input.", joy_topic.c_str());
 
-    osd_renderer_ = std::make_unique<OSDRenderer>();
+    // Initialize OSDRenderer, passing a raw pointer to this node
+    // This avoids the bad_weak_ptr issue by not calling shared_from_this() in the constructor.
+    osd_renderer_ = std::make_unique<OSDRenderer>(this); // Changed to pass 'this' raw pointer
 
     gst_init(nullptr, nullptr);
     main_loop_ = g_main_loop_new(nullptr, FALSE);
 
     GError *error = nullptr;
-    pipeline_ = gst_parse_launch(pipeline_str.c_str(), &error);
+    pipeline_ = gst_parse_launch(pipeline_string.c_str(), &error);
     if (!pipeline_)
     {
         RCLCPP_FATAL(this->get_logger(), "Failed to parse GStreamer pipeline: %s", error ? error->message : "Unknown error");
@@ -330,6 +332,8 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
     gst_element_set_state(pipeline_, GST_STATE_PLAYING);
     RCLCPP_INFO(this->get_logger(), "Starting GStreamer main loop...");
     gstreamer_thread_ = std::thread([this]() { g_main_loop_run(main_loop_); });
+
+    RCLCPP_INFO(this->get_logger(), "ObjectDetectionNode fully initialized.");
 }
 
 // --- Destructor ---
@@ -384,6 +388,7 @@ void ObjectDetectionNode::populate_ros_detection_message(NvDsObjectMeta *obj_met
     detection.bbox.center.position.y = obj_meta->rect_params.top + obj_meta->rect_params.height / 2.0;
     detection.bbox.size_x = obj_meta->rect_params.width;
     detection.bbox.size_y = obj_meta->rect_params.height;
+    detection.id = std::to_string(obj_meta->object_id);
     detection_array_msg.detections.push_back(detection);
 }
 
@@ -395,7 +400,6 @@ void ObjectDetectionNode::manage_selected_object_kalman_filter(
     double &predicted_vx, double &predicted_vy)
 {
     if (selected_object_id_ != UNTRACKED_OBJECT_ID) {
-        // Update DeepStream tracker state ONLY if the object was detected in THIS frame.
         if (selected_object_found_in_frame && current_selected_obj_meta_ptr) {
             bool tracker_meta_found = false;
             RCLCPP_DEBUG(this->get_logger(), "Selected Object ID %lu: %s. Iterating through user metadata.",
@@ -411,7 +415,7 @@ void ObjectDetectionNode::manage_selected_object_kalman_filter(
                         selected_object_tracker_state_ = selected_tracker_obj_data->list[0].trackerState;
                         tracker_meta_found = true;
                     }
-                    break; // Found the tracker metadata, no need to check further user meta
+                    break;
                 }
             }
             if (!tracker_meta_found) {
@@ -420,9 +424,7 @@ void ObjectDetectionNode::manage_selected_object_kalman_filter(
                 selected_object_tracker_state_ = EMPTY;
             }
         }
-        // If selected_object_found_in_frame is false, selected_object_tracker_state_ retains its last known value.
 
-        // Manage Kalman Filter state for the selected object
         if (!selected_object_kf_initialized_ || !selected_object_kf_) {
             if (selected_object_found_in_frame) {
                 selected_object_kf_ = std::make_unique<KalmanFilter2D>();
@@ -436,7 +438,7 @@ void ObjectDetectionNode::manage_selected_object_kalman_filter(
                 RCLCPP_DEBUG(this->get_logger(), "Selected object %lu not found and KF not initialized. Will deselect if not found soon.",
                              selected_object_id_);
             }
-        } else { // KF is already initialized
+        } else {
             selected_object_kf_->predict();
 
             if (selected_object_found_in_frame) {
@@ -450,9 +452,6 @@ void ObjectDetectionNode::manage_selected_object_kalman_filter(
                 RCLCPP_DEBUG(this->get_logger(), "Selected object ID %lu KF predicting. Frames lost: %u (DS state: %d)",
                              selected_object_id_, selected_object_lost_frames_, selected_object_tracker_state_);
 
-                // Deselection logic for the selected object:
-                // Deselect if our Kalman Filter has been predicting for too long (`KF_LOST_THRESHOLD` frames)
-                // AND the DeepStream tracker also reports the object as `EMPTY` (fully lost/terminated).
                 if (selected_object_lost_frames_ > KF_LOST_THRESHOLD && selected_object_tracker_state_ == EMPTY)
                 {
                     RCLCPP_INFO(this->get_logger(), "Selected object ID %lu lost by KF (predicted for %u frames) and DeepStream tracker state is EMPTY. Deselecting.",
@@ -461,35 +460,30 @@ void ObjectDetectionNode::manage_selected_object_kalman_filter(
                     selected_object_kf_initialized_ = false;
                     selected_object_kf_.reset();
                     selected_object_lost_frames_ = 0;
-                    selected_object_tracker_state_ = EMPTY; // Explicitly set to EMPTY on deselection
+                    selected_object_tracker_state_ = EMPTY;
                 }
             }
         }
 
-        // Retrieve predicted values ONLY IF KF is still valid AFTER all state updates/deselection
         if (selected_object_kf_initialized_ && selected_object_kf_) {
             predicted_x = selected_object_kf_->getX();
             predicted_y = selected_object_kf_->getY();
             predicted_vx = selected_object_kf_->getVx();
             predicted_vy = selected_object_kf_->getVy();
 
-            // Update selected_object_last_bbox_ with predicted center, maintaining its original width/height
             selected_object_last_bbox_.left = predicted_x - selected_object_last_bbox_.width / 2.0;
             selected_object_last_bbox_.top = predicted_y - selected_object_last_bbox_.height / 2.0;
         } else {
-            // If KF is not initialized or was just reset (object deselected),
-            // ensure predicted values are zeroed out for OSD display consistency.
             predicted_x = 0.0; predicted_y = 0.0; predicted_vx = 0.0; predicted_vy = 0.0;
         }
     }
-    else { // selected_object_id_ is UNTRACKED_OBJECT_ID
-        // If no object is selected, ensure all KF related states are reset.
+    else {
         if (selected_object_kf_initialized_ || selected_object_kf_) {
             selected_object_kf_initialized_ = false;
             selected_object_kf_.reset();
             selected_object_lost_frames_ = 0;
         }
-        selected_object_tracker_state_ = EMPTY; // Ensure it's EMPTY when no object is selected
+        selected_object_tracker_state_ = EMPTY;
         predicted_x = 0.0; predicted_y = 0.0; predicted_vx = 0.0; predicted_vy = 0.0;
     }
 }
@@ -504,6 +498,8 @@ void ObjectDetectionNode::cycle_selected_target(bool forward)
         selected_object_id_ = UNTRACKED_OBJECT_ID;
         selected_object_kf_initialized_ = false;
         selected_object_kf_.reset();
+        selected_object_lost_frames_ = 0;
+        selected_object_tracker_state_ = EMPTY;
         RCLCPP_INFO(this->get_logger(), "No objects currently detected to select.");
         return;
     }
@@ -519,7 +515,6 @@ void ObjectDetectionNode::cycle_selected_target(bool forward)
 
     if (it == object_ids.end() || selected_object_id_ == UNTRACKED_OBJECT_ID)
     {
-        // If current selected ID is not found or is UNTRACKED, select the first/last available
         if (forward) {
             selected_object_id_ = object_ids[0];
         } else {
@@ -528,12 +523,11 @@ void ObjectDetectionNode::cycle_selected_target(bool forward)
     }
     else
     {
-        // Cycle to the next/previous object
         if (forward) {
             ++it;
             if (it == object_ids.end())
             {
-                selected_object_id_ = object_ids[0]; // Wrap around to the beginning
+                selected_object_id_ = object_ids[0];
             }
             else
             {
@@ -542,7 +536,7 @@ void ObjectDetectionNode::cycle_selected_target(bool forward)
         } else {
             if (it == object_ids.begin())
             {
-                selected_object_id_ = object_ids.back(); // Wrap around to the end
+                selected_object_id_ = object_ids.back();
             }
             else
             {
@@ -552,10 +546,10 @@ void ObjectDetectionNode::cycle_selected_target(bool forward)
         }
     }
     RCLCPP_INFO(this->get_logger(), "New selected object ID: %lu", selected_object_id_);
-    selected_object_kf_initialized_ = false; // Reset KF to re-initialize for new selection
+    selected_object_kf_initialized_ = false;
     selected_object_kf_.reset();
     selected_object_lost_frames_ = 0;
-    selected_object_tracker_state_ = EMPTY; // Reset DeepStream tracker state on new selection
+    selected_object_tracker_state_ = EMPTY;
 }
 
 // --- Callback for joystick input ---

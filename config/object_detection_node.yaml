@@ -1,0 +1,40 @@
+object_detection_node:
+  ros__parameters:
+    # GStreamer Pipeline Definition
+    # Using a literal block scalar (|) to preserve multi-line formatting and indentation.
+    # IMPORTANT: Ensure your pipeline string includes 'nvdsosd_0' and 'ros_sink' elements
+    # as these are hardcoded for probes/callbacks in your C++ code.
+    pipeline_string: |
+      v4l2src device="/dev/video0" !
+      image/jpeg, width=1280, height=720, framerate=30/1 !
+      jpegdec !
+      video/x-raw, format=I420 !
+      nvvideoconvert !
+      video/x-raw(memory:NVMM), format=NV12 !
+      mux.sink_0 nvstreammux name=mux batch-size=1 width=1280 height=720 !
+      nvinfer name=pgie_0 config-file-path=config/inference/pgie_yolov11_config.txt !
+      nvtracker ll-lib-file=/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so ll-config-file=config/tracking/tracker_config.yaml !
+      nvdsosd name=nvdsosd_0 !
+      nvvideoconvert !
+      video/x-raw, format=BGRx !
+      videoconvert !
+      jpegenc !
+      appsink name=ros_sink emit-signals=true sync=false
+
+    # Object Class Filtering
+    # List of class IDs to allow for detection and tracking.
+    # If empty ([]), all detected classes will be processed.
+    # Example for COCO dataset: 0=person, 2=car, 5=bus, 7=truck
+    allowed_class_ids: [0, 2, 5, 7]
+    # allowed_class_ids: [] # Uncomment this line to allow all classes
+
+    # ROS 2 Topic Names
+    detection_topic: "detections"
+    image_topic: "image_raw/compressed"
+    joy_topic: "/joy"
+
+    # ROS 2 QoS Settings
+    # If true, uses reliable QoS. If false, uses best_effort.
+    use_qos_reliable: true
+    # Depth of the QoS history buffer.
+    qos_history_depth: 1
