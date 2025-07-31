@@ -2,7 +2,7 @@
 #include "ros2_object_detection/osd_renderer.hpp"
 
 // Standard C++ includes
-#include <cmath>       // For std::abs
+#include <cmath>       // For std::abs, std::sqrt
 #include <iomanip>     // For std::setprecision
 #include <sstream>     // For std::stringstream
 
@@ -10,14 +10,12 @@
 #include "nvdsmeta.h"
 
 // --- Constructor ---
-// Updated constructor to accept a raw pointer to the ROS 2 node
-OSDRenderer::OSDRenderer(rclcpp::Node* node_ptr) // Changed to raw pointer
-    : node_(node_ptr), // Initialize the node_ member with the raw pointer
+OSDRenderer::OSDRenderer(rclcpp::Node* node_ptr)
+    : node_(node_ptr),
       last_fps_update_time_(std::chrono::steady_clock::now()),
       frame_count_(0),
       current_fps_(0.0)
 {
-    // Initialize OSD colors.
     red_color_ = {1.0, 0.0, 0.0, 1.0}; // RGBA
     green_color_ = {0.0, 1.0, 0.0, 1.0};
     blue_color_ = {0.0, 0.0, 1.0, 1.0};
@@ -39,7 +37,6 @@ OSDRenderer::~OSDRenderer()
     if (node_) {
         RCLCPP_INFO(node_->get_logger(), "OSDRenderer destroyed.");
     }
-    // No need to delete node_ptr as it's a raw pointer owned by ObjectDetectionNode
 }
 
 // --- Public Methods ---
@@ -103,7 +100,7 @@ void OSDRenderer::render_selected_object_osd(
     bool selected_object_kf_initialized,
     const NvOSD_RectParams &selected_object_last_bbox,
     unsigned int selected_object_lost_frames,
-    TRACKER_STATE selected_object_tracker_state,
+    [[maybe_unused]] TRACKER_STATE selected_object_tracker_state,
     double predicted_vx, double predicted_vy,
     bool is_selected_object_currently_detected,
     NvDsObjectMeta *selected_obj_meta_ptr)
@@ -144,7 +141,7 @@ void OSDRenderer::render_selected_object_osd(
 
         gfloat center_x = current_bbox.left + current_bbox.width / 2.0;
         gfloat center_y = current_bbox.top + current_bbox.height / 2.0;
-        draw_reticule(batch_meta, frame_meta, center_x, center_y, 20.0, selected_color, 2);
+        draw_reticule(batch_meta, frame_meta, center_x, center_y, 50.0, selected_color, 1, ReticuleStyle::CROSS_DIAGONAL);
 
     } else { // Object is occluded (KF is predicting)
         draw_bounding_box(batch_meta, frame_meta, selected_object_last_bbox, selected_color, 3);
@@ -165,7 +162,7 @@ void OSDRenderer::render_selected_object_osd(
 
         gfloat center_x = selected_object_last_bbox.left + selected_object_last_bbox.width / 2.0;
         gfloat center_y = selected_object_last_bbox.top + selected_object_last_bbox.height / 2.0;
-        draw_reticule(batch_meta, frame_meta, center_x, center_y, 20.0, selected_color, 2);
+        draw_reticule(batch_meta, frame_meta, center_x, center_y, 50.0, selected_color, 1, ReticuleStyle::CROSS_DIAGONAL);
     }
 }
 
@@ -209,30 +206,139 @@ void OSDRenderer::draw_text(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta
 
 
 void OSDRenderer::draw_reticule(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta,
-                                       double center_x, double center_y, double size, const NvOSD_ColorParams &color, unsigned int line_width)
+                                       double center_x, double center_y, double size, const NvOSD_ColorParams &color, unsigned int line_width, ReticuleStyle style)
 {
+    if (style == ReticuleStyle::NONE) {
+        return; // Do not draw anything
+    }
+
     NvDsDisplayMeta *reticule_display_meta = nvds_acquire_display_meta_from_pool(batch_meta);
-    if (reticule_display_meta)
-    {
-        reticule_display_meta->num_lines = 2;
+    if (!reticule_display_meta) {
+        if (node_) RCLCPP_WARN(node_->get_logger(), "Failed to acquire display meta for reticule.");
+        return;
+    }
 
-        reticule_display_meta->line_params[0].x1 = (guint)(center_x - size / 2.0);
-        reticule_display_meta->line_params[0].y1 = (guint)center_y;
-        reticule_display_meta->line_params[0].x2 = (guint)(center_x + size / 2.0);
-        reticule_display_meta->line_params[0].y2 = (guint)center_y;
-        reticule_display_meta->line_params[0].line_width = line_width;
-        reticule_display_meta->line_params[0].line_color = color;
+    reticule_display_meta->num_lines = 0; // Reset line count for each style
+    reticule_display_meta->num_circles = 0; // Reset circle count for each style
 
-        reticule_display_meta->line_params[1].x1 = (guint)center_x;
-        reticule_display_meta->line_params[1].y1 = (guint)(center_y - size / 2.0);
-        reticule_display_meta->line_params[1].x2 = (guint)center_x;
-        reticule_display_meta->line_params[1].y2 = (guint)(center_y + size / 2.0);
-        reticule_display_meta->line_params[1].line_width = line_width;
-        reticule_display_meta->line_params[1].line_color = color;
+    switch (style) {
+        case ReticuleStyle::POINT: {
+            reticule_display_meta->num_circles = 1;
+            reticule_display_meta->circle_params[0].xc = (guint)center_x;
+            reticule_display_meta->circle_params[0].yc = (guint)center_y;
+            reticule_display_meta->circle_params[0].radius = line_width; // Use line_width for point size
+            reticule_display_meta->circle_params[0].circle_color = color;
+            reticule_display_meta->circle_params[0].has_bg_color = 1; // Filled circle
+            reticule_display_meta->circle_params[0].bg_color = color;
+            break;
+        }
+        case ReticuleStyle::CIRCLE: {
+            reticule_display_meta->num_circles = 1;
+            reticule_display_meta->circle_params[0].xc = (guint)center_x;
+            reticule_display_meta->circle_params[0].yc = (guint)center_y;
+            reticule_display_meta->circle_params[0].radius = size / 2.0; // Radius based on size
+            reticule_display_meta->circle_params[0].circle_color = color;
+            reticule_display_meta->circle_params[0].circle_width = line_width; // Corrected: line_width -> circle_width
+            reticule_display_meta->circle_params[0].has_bg_color = 0; // Outline only
+            break;
+        }
+        case ReticuleStyle::CROSS: {
+            reticule_display_meta->num_lines = 2;
+            // Horizontal line
+            reticule_display_meta->line_params[0].x1 = (guint)(center_x - size / 2.0);
+            reticule_display_meta->line_params[0].y1 = (guint)center_y;
+            reticule_display_meta->line_params[0].x2 = (guint)(center_x + size / 2.0);
+            reticule_display_meta->line_params[0].y2 = (guint)center_y;
+            reticule_display_meta->line_params[0].line_width = line_width;
+            reticule_display_meta->line_params[0].line_color = color;
 
+            // Vertical line
+            reticule_display_meta->line_params[1].x1 = (guint)center_x;
+            reticule_display_meta->line_params[1].y1 = (guint)(center_y - size / 2.0);
+            reticule_display_meta->line_params[1].x2 = (guint)center_x;
+            reticule_display_meta->line_params[1].y2 = (guint)(center_y + size / 2.0);
+            reticule_display_meta->line_params[1].line_width = line_width;
+            reticule_display_meta->line_params[1].line_color = color;
+            break;
+        }
+        case ReticuleStyle::CROSS_DIAGONAL: {
+            // Calculate a gap size for the lines from the center dot
+            const double gap_from_center = line_width * 5.0; // Adjust this value as needed for the desired gap
+
+            reticule_display_meta->num_lines = 4; // Two diagonals + two horizontal/vertical segments
+            reticule_display_meta->num_circles = 1; // For the central dot
+
+            // Central dot
+            reticule_display_meta->circle_params[0].xc = (guint)center_x;
+            reticule_display_meta->circle_params[0].yc = (guint)center_y;
+            reticule_display_meta->circle_params[0].radius = line_width; // Size of the dot
+            reticule_display_meta->circle_params[0].circle_color = color;
+            reticule_display_meta->circle_params[0].has_bg_color = 1; // Filled circle
+            reticule_display_meta->circle_params[0].bg_color = color;
+
+            // Calculate diagonal line segment lengths and offsets
+            // Total diagonal length from center to corner is size / (2.0 * sqrt(2.0))
+            // We want to start after gap_from_center
+            const double total_half_diag_length = size / (2.0 * std::sqrt(2.0));
+            const double line_segment_length = total_half_diag_length - gap_from_center;
+
+            if (line_segment_length > 0) { // Only draw if line segment is positive
+                // Calculate offset for start/end points of diagonal segments
+                const double offset_x_start = (gap_from_center / total_half_diag_length) * (size / (2.0 * std::sqrt(2.0)));
+                const double offset_y_start = offset_x_start; // For 45-degree diagonals
+
+                const double offset_x_end = (line_segment_length / total_half_diag_length) * (size / (2.0 * std::sqrt(2.0)));
+                const double offset_y_end = offset_x_end;
+
+                // Diagonal 1 (top-left to bottom-right)
+                reticule_display_meta->line_params[0].x1 = (guint)(center_x - offset_x_start);
+                reticule_display_meta->line_params[0].y1 = (guint)(center_y - offset_y_start);
+                reticule_display_meta->line_params[0].x2 = (guint)(center_x - offset_x_end);
+                reticule_display_meta->line_params[0].y2 = (guint)(center_y - offset_y_end);
+                reticule_display_meta->line_params[0].line_width = line_width;
+                reticule_display_meta->line_params[0].line_color = color;
+
+                reticule_display_meta->line_params[1].x1 = (guint)(center_x + offset_x_start);
+                reticule_display_meta->line_params[1].y1 = (guint)(center_y + offset_y_start);
+                reticule_display_meta->line_params[1].x2 = (guint)(center_x + offset_x_end);
+                reticule_display_meta->line_params[1].y2 = (guint)(center_y + offset_y_end);
+                reticule_display_meta->line_params[1].line_width = line_width;
+                reticule_display_meta->line_params[1].line_color = color;
+
+                // Diagonal 2 (bottom-left to top-right)
+                reticule_display_meta->line_params[2].x1 = (guint)(center_x - offset_x_start);
+                reticule_display_meta->line_params[2].y1 = (guint)(center_y + offset_y_start);
+                reticule_display_meta->line_params[2].x2 = (guint)(center_x - offset_x_end);
+                reticule_display_meta->line_params[2].y2 = (guint)(center_y + offset_y_end);
+                reticule_display_meta->line_params[2].line_width = line_width;
+                reticule_display_meta->line_params[2].line_color = color;
+
+                reticule_display_meta->line_params[3].x1 = (guint)(center_x + offset_x_start);
+                reticule_display_meta->line_params[3].y1 = (guint)(center_y - offset_y_start);
+                reticule_display_meta->line_params[3].x2 = (guint)(center_x + offset_x_end);
+                reticule_display_meta->line_params[3].y2 = (guint)(center_y - offset_y_end);
+                reticule_display_meta->line_params[3].line_width = line_width;
+                reticule_display_meta->line_params[3].line_color = color;
+            } else {
+                // If line segments would be too short/negative, only draw the central dot
+                reticule_display_meta->num_lines = 0;
+            }
+            break;
+        }
+        case ReticuleStyle::NONE: // Fallthrough, handled by initial check
+        default:
+            break;
+    }
+
+    // Only add display meta if something was actually drawn
+    if (reticule_display_meta->num_lines > 0 || reticule_display_meta->num_circles > 0) {
         nvds_add_display_meta_to_frame(frame_meta, reticule_display_meta);
     } else {
-        if (node_) RCLCPP_WARN(node_->get_logger(), "Failed to acquire display meta for reticule.");
+        // If nothing was drawn, release the acquired display meta back to the pool
+        // This function might not exist in older DeepStream versions.
+        // If compilation fails here, consider commenting out this line.
+        // However, not releasing might lead to memory leaks or resource exhaustion.
+        // nvds_release_display_meta(batch_meta, reticule_display_meta);
     }
 }
 

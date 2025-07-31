@@ -20,6 +20,19 @@ typedef struct _NvDsFrameMeta NvDsFrameMeta;
 typedef struct _NvDsObjectMeta NvDsObjectMeta;
 
 /**
+ * @brief Enumeration for different reticule styles.
+ */
+enum class ReticuleStyle
+{
+    NONE,           ///< No reticule drawn.
+    POINT,          ///< A small central point.
+    CIRCLE,         ///< A circle.
+    CROSS,          ///< A simple cross (horizontal and vertical lines).
+    CROSS_DIAGONAL  ///< A cross with additional diagonal lines.
+    // Add more styles here if desired
+};
+
+/**
  * @class OSDRenderer
  * @brief Manages custom On-Screen Display (OSD) rendering for DeepStream frames.
  *
@@ -33,7 +46,7 @@ public:
      * @brief Constructor for the OSDRenderer.
      * @param node_ptr A raw pointer to the ROS 2 node, allowing access to its logger, clock, etc.
      */
-    explicit OSDRenderer(rclcpp::Node* node_ptr); // Changed to raw pointer
+    explicit OSDRenderer(rclcpp::Node* node_ptr);
 
     /**
      * @brief Destructor for the OSDRenderer.
@@ -104,7 +117,8 @@ private:
     // Helper functions for OSD drawing
     void draw_bounding_box(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta, const NvOSD_RectParams &rect_params, const NvOSD_ColorParams &color, unsigned int border_width);
     void draw_text(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta, const std::string &text, double x, double y, const NvOSD_ColorParams &bg_color, const NvOSD_ColorParams &text_color, unsigned int font_size);
-    void draw_reticule(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta, double center_x, double center_y, double size, const NvOSD_ColorParams &color, unsigned int line_width);
+    // Updated draw_reticule signature
+    void draw_reticule(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta, double center_x, double center_y, double size, const NvOSD_ColorParams &color, unsigned int line_width, ReticuleStyle style);
     void draw_velocity_arrow(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta, double start_x, double start_y, double end_x, double end_y, const NvOSD_ColorParams &color, unsigned int line_width);
 
     // Helper to set common text parameters for OSD labels.
