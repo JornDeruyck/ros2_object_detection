@@ -10,6 +10,8 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(vision_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(std_msgs REQUIRED)      # Added for target_logic_node
+find_package(geometry_msgs REQUIRED) # Added for target_logic_node
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(PkgConfig REQUIRED)
@@ -23,30 +25,35 @@ pkg_check_modules(GLIB REQUIRED glib-2.0)
 # Find DeepStream libraries
 find_library(NVDS_META_LIB
   NAMES nvds_meta
-  PATHS /opt/nvidia/deepstream/deepstream-7.1/lib/
+  PATHS /opt/nvidia/deepstream/deepstream/lib/
   NO_DEFAULT_PATH
 )
 if(NOT NVDS_META_LIB)
-  message(FATAL_ERROR "DeepStream nvds_meta library not found! Please ensure libnvds_meta.so is in /opt/nvidia/deepstream/deepstream-7.1/lib/")
+  message(FATAL_ERROR "DeepStream nvds_meta library not found! Please check your DeepStream installation path.")
 endif()
 
 find_library(GST_NVDS_META_LIB
   NAMES nvdsgst_meta
-  PATHS /opt/nvidia/deepstream/deepstream-7.1/lib/
+  PATHS /opt/nvidia/deepstream/deepstream/lib/
   NO_DEFAULT_PATH
 )
 if(NOT GST_NVDS_META_LIB)
-  message(FATAL_ERROR "DeepStream gstnvdsmeta library not found! Please ensure libgstnvdsmeta.so is in /opt/nvidia/deepstream/deepstream-7.1/lib/")
+  message(FATAL_ERROR "DeepStream gstnvdsmeta library not found! Please check your DeepStream installation path.")
 endif()
 
-# Build the C++ node executable
+# Build the object detection node executable
 add_executable(object_detection_node
   src/object_detection.cpp
   src/kalman_filter_2d.cpp
   src/osd_renderer.cpp
 )
 
-# Add dependencies for your node
+# Build the target logic node executable
+add_executable(target_logic_node
+  src/target_logic.cpp
+)
+
+# Add dependencies for the object detection node
 ament_target_dependencies(object_detection_node
   rclcpp
   yaml-cpp
@@ -55,9 +62,18 @@ ament_target_dependencies(object_detection_node
   sensor_msgs
   image_transport
   Eigen3
+  std_msgs
 )
 
-# Add the include directories so the compiler can find all necessary headers
+# Add dependencies for the new target logic node
+ament_target_dependencies(target_logic_node
+  rclcpp
+  std_msgs
+  vision_msgs
+  geometry_msgs
+)
+
+# Add include directories for all targets
 target_include_directories(object_detection_node PUBLIC
   include
   ${GSTREAMER_INCLUDE_DIRS}
@@ -66,8 +82,11 @@ target_include_directories(object_detection_node PUBLIC
   ${YAML_CPP_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIRS}
 )
+target_include_directories(target_logic_node PUBLIC
+  include
+)
 
-# Link against all required libraries
+# Link libraries for the object detection node
 target_link_libraries(object_detection_node
   ${GSTREAMER_LIBRARIES}
   ${GLIB_LIBRARIES}
@@ -77,9 +96,10 @@ target_link_libraries(object_detection_node
   ${cv_bridge_LIBRARIES}
 )
 
-# Install targets
+# Install both executables
 install(TARGETS
   object_detection_node
+  target_logic_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
