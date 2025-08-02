@@ -41,7 +41,7 @@ public:
     void render_selected_object_osd(
         NvDsBatchMeta *batch_meta,
         NvDsFrameMeta *frame_meta,
-        guint64 selected_object_id,
+        gint64 selected_object_id,
         const std::string& selected_object_class_label,
         OSDTrackingStatus status,
         bool is_locked_target,

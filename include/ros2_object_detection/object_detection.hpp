@@ -36,7 +36,7 @@ typedef struct _NvDsFrameMeta NvDsFrameMeta;
 typedef struct _NvDsBatchMeta NvDsBatchMeta;
 typedef struct _NvDsObjectMeta NvDsObjectMeta;
 
-static const guint64 NO_OBJECT_ID = 0;
+static const gint64 NO_OBJECT_ID = -1;
 
 /**
  * @brief Custom enum for the tracking status of the selected object for OSD.
@@ -84,8 +84,8 @@ private:
     OSDTrackingStatus manage_selected_object_state(const NvDsObjectMeta* selected_obj_meta);
 
     // --- State Members ---
-    guint64 selected_object_id_;
-    guint64 locked_target_id_;
+    gint64 selected_object_id_;
+    gint64 locked_target_id_;
     
     // --- Custom Kalman Filter Members (Restored) ---
     std::unique_ptr<KalmanFilter2D> selected_object_kf_;

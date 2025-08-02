@@ -76,7 +76,7 @@ void TargetLogicNode::target_id_callback(const std_msgs::msg::UInt64::SharedPtr 
 
 void TargetLogicNode::detection_callback(const vision_msgs::msg::Detection2DArray::SharedPtr msg)
 {
-    if (target_id_to_track_ == 0) {
+    if (target_id_to_track_ <= 0) {
         return;
     }
 

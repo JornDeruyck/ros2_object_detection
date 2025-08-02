@@ -20,7 +20,7 @@ OSDRenderer::OSDRenderer(rclcpp::Node* node_ptr)
 {
     red_color_ = {1.0, 0.0, 0.0, 1.0};
     green_color_ = {0.0, 1.0, 0.0, 1.0};
-    blue_color_ = {0.0, 0.0, 1.0, 1.0};
+    blue_color_ = {0.3, 0.5, 1.0, 1.0};
     white_color_ = {1.0, 1.0, 1.0, 1.0};
     yellow_color_ = {1.0, 1.0, 0.0, 1.0};
     black_color_ = {0.0, 0.0, 0.0, 0.7}; // Semi-transparent black for backdrops
@@ -44,14 +44,20 @@ void OSDRenderer::update_and_display_fps(NvDsBatchMeta *batch_meta, NvDsFrameMet
     draw_text(batch_meta, frame_meta, fps_text, 10, 10, white_color_);
 }
 
-void OSDRenderer::render_non_selected_object_osd(NvDsBatchMeta* /*batch_meta*/, NvDsFrameMeta* /*frame_meta*/, NvDsObjectMeta *obj_meta)
+void OSDRenderer::render_non_selected_object_osd(NvDsBatchMeta* batch_meta, NvDsFrameMeta* frame_meta, NvDsObjectMeta *obj_meta)
 {
     std::stringstream ss_label_conf;
     ss_label_conf << obj_meta->obj_label << " ID:" << obj_meta->object_id;
 
-    obj_meta->rect_params.border_width = 2;
-    obj_meta->rect_params.border_color = blue_color_;
-    obj_meta->rect_params.has_bg_color = 0;
+    // Suppress the default OSD from nvdsosd completely
+    obj_meta->rect_params.border_width = 0;
+    if (obj_meta->text_params.display_text) {
+        g_free(obj_meta->text_params.display_text);
+        obj_meta->text_params.display_text = nullptr;
+    }
+
+    // Draw our own custom bounding box by adding new display metadata
+    draw_bounding_box(batch_meta, frame_meta, obj_meta->rect_params, blue_color_, 2);
 
     // --- Centering Logic for Non-Selected Objects ---
     const int avg_char_width = 8;
@@ -59,24 +65,18 @@ void OSDRenderer::render_non_selected_object_osd(NvDsBatchMeta* /*batch_meta*/, 
     double text_x_pos = bbox_center_x - (ss_label_conf.str().length() * avg_char_width / 2.0);
     text_x_pos = std::max(0.0, text_x_pos);
 
-    gint text_y_pos = (gint)(obj_meta->rect_params.top - 25) < 0 
-        ? (guint)(obj_meta->rect_params.top + obj_meta->rect_params.height + 5) 
-        : (guint)(obj_meta->rect_params.top - 25);
+    gint text_y_pos = (gint)(obj_meta->rect_params.top - 30) < 0
+        ? (guint)(obj_meta->rect_params.top + obj_meta->rect_params.height + 5)
+        : (guint)(obj_meta->rect_params.top - 30);
 
-    set_text_params(
-        &obj_meta->text_params,
-        (guint)text_x_pos,
-        text_y_pos,
-        blue_color_,
-        ss_label_conf.str(),
-        true // with backdrop
-    );
+    // Draw our own custom text by adding new display metadata
+    draw_text(batch_meta, frame_meta, ss_label_conf.str(), text_x_pos, text_y_pos, blue_color_);
 }
 
 void OSDRenderer::render_selected_object_osd(
     NvDsBatchMeta *batch_meta,
     NvDsFrameMeta *frame_meta,
-    guint64 selected_object_id,
+    gint64 selected_object_id,
     const std::string& selected_object_class_label,
     OSDTrackingStatus status,
     bool is_locked_target,
@@ -115,8 +115,8 @@ void OSDRenderer::render_selected_object_osd(
 
     std::stringstream ss_line1, ss_line2;
     ss_line1 << "ID: " << selected_object_id << " " << selected_object_class_label << " | " << status_string;
-    ss_line2 << "P:(" << format_fixed_width(pos_x_rad, 6, 3) << "," << format_fixed_width(pos_y_rad, 6, 3) << ") rad"
-             << "V:(" << format_fixed_width(vx_rad_s, 6, 3) << "," << format_fixed_width(vy_rad_s, 6, 3) << ") rad/s";
+    ss_line2 << "P:(" << format_fixed_width(pos_x_rad, 6, 3) << "," << format_fixed_width(pos_y_rad, 6, 3) << ") "
+             << "V:(" << format_fixed_width(vx_rad_s, 6, 3) << "," << format_fixed_width(vy_rad_s, 6, 3) << ") rad";
 
     const double bbox_center_x = current_bbox_params.left + current_bbox_params.width / 2.0;
     const int avg_char_width = 8;
@@ -126,14 +126,13 @@ void OSDRenderer::render_selected_object_osd(
     x_line1 = std::max(0.0, x_line1);
     x_line2 = std::max(0.0, x_line2);
 
-    // --- Repositioned Text Logic ---
     gint y_line1, y_line2;
-    if ((gint)current_bbox_params.top > 30) { // Enough space for one line above
+    if ((gint)current_bbox_params.top > 30) {
         y_line1 = current_bbox_params.top - 30;
-        y_line2 = current_bbox_params.top + 0; // Position second line just inside the box
-    } else { // Not enough space, place both below
-        y_line1 = current_bbox_params.top + current_bbox_params.height + 5;
-        y_line2 = y_line1 + 25;
+        y_line2 = current_bbox_params.top + 0;
+    } else {
+        y_line1 = current_bbox_params.top + current_bbox_params.height + 0;
+        y_line2 = y_line1 + 30;
     }
 
     draw_text(batch_meta, frame_meta, ss_line1.str(), x_line1, y_line1, selected_color);
@@ -214,7 +213,7 @@ void OSDRenderer::set_text_params(NvOSD_TextParams *text_params, guint x_offset,
     text_params->x_offset = x_offset;
     text_params->y_offset = y_offset;
     text_params->font_params.font_name = (gchar *)"Sans";
-    text_params->font_params.font_size = 14;
+    text_params->font_params.font_size = 12;
     text_params->font_params.font_color = font_color;
     if (with_backdrop) {
         text_params->set_bg_clr = 1;
