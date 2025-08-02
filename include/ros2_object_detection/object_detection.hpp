@@ -32,7 +32,6 @@
 // Custom local includes
 #include "ros2_object_detection/kalman_filter_2d.hpp"
 #include "ros2_object_detection/constants.hpp"
-#include "ros2_object_detection/osd_renderer.hpp"
 
 // Forward declarations for GStreamer types.
 typedef struct _GstElement GstElement;
@@ -41,6 +40,25 @@ typedef struct _GstPadProbeInfo GstPadProbeInfo;
 typedef struct _NvDsFrameMeta NvDsFrameMeta;
 typedef struct _NvDsBatchMeta NvDsBatchMeta;
 typedef struct _NvDsObjectMeta NvDsObjectMeta;
+
+/**
+ * @brief Custom constant for an unselected object ID.
+ * This is renamed to avoid a conflict with a DeepStream macro.
+ */
+static const guint64 NO_OBJECT_ID = 0;
+
+/**
+ * @brief Custom enum for the tracking status of the selected object.
+ * This abstracts the underlying DeepStream and KF states for OSD display.
+ */
+enum TrackingStatus {
+    DETECTED,
+    OCCLUDED,
+    TRACKED
+};
+
+// Forward declaration of OSDRenderer, as it needs to be used in this class.
+class OSDRenderer;
 
 /**
  * @class ObjectDetectionNode
@@ -107,47 +125,39 @@ private:
 
     /**
      * @brief Manages the Kalman Filter for the selected object, including prediction, update, and deselection logic.
+     * This method now returns the predicted state and the tracking status.
      * @param selected_object_found_in_frame True if the selected object was detected in the current frame.
      * @param current_selected_bbox_detected The detected bounding box of the selected object, if found.
-     * @param current_selected_obj_meta_ptr Pointer to the NvDsObjectMeta of the selected object, if found.
-     * @param[out] predicted_x The predicted X coordinate from the KF.
-     * @param[out] predicted_y The predicted Y coordinate from the KF.
-     * @param[out] predicted_vx The predicted X velocity from the KF.
-     * @param[out] predicted_vy The predicted Y velocity from the KF.
+     * @return The current TrackingStatus of the selected object.
      */
-    void manage_selected_object_kalman_filter(
+    TrackingStatus manage_selected_object_kalman_filter(
         bool selected_object_found_in_frame,
-        const NvOSD_RectParams &current_selected_bbox_detected,
-        NvDsObjectMeta *current_selected_obj_meta_ptr,
-        double &predicted_x, double &predicted_y,
-        double &predicted_vx, double &predicted_vy);
+        const NvOSD_RectParams &current_selected_bbox_detected);
     
     // --- Members for target selection, highlighting, and custom tracking ---
-    guint64 selected_object_id_;                                  ///< The ID of the currently selected object.
-    std::map<guint64, NvOSD_RectParams> current_tracked_objects_; ///< Map of object_id to their last known bounding box (only for currently detected).
-    std::mutex tracked_objects_mutex_;                            ///< Mutex to protect current_tracked_objects_ and selected_object_id_.
+    // Note: These members are now ordered to match the constructor initialization list
+    guint64 selected_object_id_;
+    std::unique_ptr<KalmanFilter2D> selected_object_kf_;
+    bool selected_object_kf_initialized_;
+    unsigned int selected_object_lost_frames_;
+    bool is_actively_tracking_;
+    bool button0_pressed_prev_;
+    bool button1_pressed_prev_;
+    bool button2_pressed_prev_;
+    
+    std::map<guint64, NvOSD_RectParams> current_tracked_objects_;
+    std::map<guint64, std::string> current_tracked_classes_;
+    std::mutex tracked_objects_mutex_;
 
-    // Custom Kalman Filter for the SELECTED object
-    std::unique_ptr<KalmanFilter2D> selected_object_kf_; ///< Kalman filter instance for the selected object.
-    bool selected_object_kf_initialized_;                 ///< Flag to indicate if the KF for the selected object is initialized.
-    unsigned int selected_object_lost_frames_;            ///< Counts frames the selected object has been out of view of the detector (used by KF).
-
-    // Member to store the last known bounding box (predicted or detected) for the selected object
-    // This allows drawing the reticule even if the object is occluded.
     NvOSD_RectParams selected_object_last_bbox_;
-
-    // Member to track the DeepStream tracker's reported state for the selected object
-    TRACKER_STATE selected_object_tracker_state_;
-
-    // To prevent rapid cycling on button hold
-    bool button0_pressed_prev_; ///< Previous state of joystick button 0.
-    bool button1_pressed_prev_; ///< Previous state of joystick button 1.
-
+    std::string selected_object_class_label_;
+    
     // OSD Renderer instance
-    std::unique_ptr<OSDRenderer> osd_renderer_; ///< Manages all OSD drawing.
+    std::unique_ptr<OSDRenderer> osd_renderer_;
 
-    // NEW: Parameter for class filtering
-    std::vector<long int> allowed_class_ids_; ///< List of class IDs to allow for detection and tracking. Changed from int to long int.
+    // Parameters
+    std::vector<long int> allowed_class_ids_;
+    double camera_fov_rad_;
 };
 
 #endif // OBJECT_DETECTION_HPP

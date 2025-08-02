@@ -2,7 +2,7 @@
 #include "ros2_object_detection/osd_renderer.hpp"
 
 // Standard C++ includes
-#include <cmath>       // For std::abs, std::sqrt
+#include <cmath>       // For std::abs, std::sqrt, std::tan
 #include <iomanip>     // For std::setprecision
 #include <sstream>     // For std::stringstream
 
@@ -78,8 +78,8 @@ void OSDRenderer::render_non_selected_object_osd(NvDsObjectMeta *obj_meta)
     ss_label_conf << std::fixed << std::setprecision(2);
 
     ss_label_conf << obj_meta->obj_label << " ID: " << obj_meta->object_id
-                  << " Conf: " << obj_meta->confidence
-                  << " TrkConf: " << obj_meta->tracker_confidence;
+                  << " Conf: " << obj_meta->confidence;
+    // Removed TrkConf as it's not always reliable and adds length.
 
     obj_meta->rect_params.border_color = blue_color_;
     obj_meta->rect_params.border_width = 3;
@@ -97,73 +97,93 @@ void OSDRenderer::render_selected_object_osd(
     NvDsBatchMeta *batch_meta,
     NvDsFrameMeta *frame_meta,
     guint64 selected_object_id,
-    bool selected_object_kf_initialized,
-    const NvOSD_RectParams &selected_object_last_bbox,
+    const std::string& selected_object_class_label,
+    TrackingStatus status,
+    bool kf_initialized,
+    const NvOSD_RectParams &current_bbox_params,
     unsigned int selected_object_lost_frames,
-    [[maybe_unused]] TRACKER_STATE selected_object_tracker_state,
     double predicted_vx, double predicted_vy,
-    bool is_selected_object_currently_detected,
-    NvDsObjectMeta *selected_obj_meta_ptr)
+    double center_x, double center_y,
+    double camera_fov_rad
+)
 {
-    if (!selected_object_kf_initialized) {
+    if (!kf_initialized) {
         return; // No KF, nothing to draw for selected object
     }
 
     NvOSD_ColorParams selected_color = red_color_;
+    const guint frame_width = frame_meta->source_frame_width;
+    const guint frame_height = frame_meta->source_frame_height;
 
-    if (is_selected_object_currently_detected) {
-        if (selected_obj_meta_ptr) {
-            selected_obj_meta_ptr->rect_params.border_color = selected_color;
-            selected_obj_meta_ptr->rect_params.border_width = 3;
-            if (selected_obj_meta_ptr->text_params.display_text) {
-                g_free(selected_obj_meta_ptr->text_params.display_text);
-                selected_obj_meta_ptr->text_params.display_text = nullptr;
-            }
-        }
+    // Calculate vertical FOV based on aspect ratio
+    const double aspect_ratio = (double)frame_width / (double)frame_height;
+    const double camera_fov_v_rad = 2.0 * std::atan(std::tan(camera_fov_rad / 2.0) / aspect_ratio);
 
-        NvOSD_RectParams current_bbox = selected_obj_meta_ptr ? selected_obj_meta_ptr->rect_params : selected_object_last_bbox;
+    // Convert pixel position to radians from center
+    double pos_x_rad = ((center_x - frame_width / 2.0) / frame_width) * camera_fov_rad;
+    double pos_y_rad = ((center_y - frame_height / 2.0) / frame_height) * camera_fov_v_rad;
 
-        std::stringstream ss_label;
-        ss_label << std::fixed << std::setprecision(2);
-        ss_label << "ID: " << selected_object_id
-                 << " Conf: " << (selected_obj_meta_ptr ? selected_obj_meta_ptr->confidence : 0.0)
-                 << " TrkConf: " << (selected_obj_meta_ptr ? selected_obj_meta_ptr->tracker_confidence : 0.0)
-                 << " Vx: " << predicted_vx
-                 << " Vy: " << predicted_vy
-                 << " (DS:Detected) (KF:Tracked)";
-
-        draw_text(batch_meta, frame_meta, ss_label.str(),
-                  current_bbox.left,
-                  (gint)(current_bbox.top - 25) < 0 ? (guint)(current_bbox.top + current_bbox.height + 5) : (guint)(current_bbox.top - 25),
-                  {0.0, 0.0, 0.0, 0.0}, // No background color
-                  selected_color,
-                  12);
-
-        gfloat center_x = current_bbox.left + current_bbox.width / 2.0;
-        gfloat center_y = current_bbox.top + current_bbox.height / 2.0;
-        draw_reticule(batch_meta, frame_meta, center_x, center_y, 50.0, selected_color, 1, ReticuleStyle::CROSS_DIAGONAL);
-
-    } else { // Object is occluded (KF is predicting)
-        draw_bounding_box(batch_meta, frame_meta, selected_object_last_bbox, selected_color, 3);
-
-        std::stringstream kf_text_ss;
-        kf_text_ss << std::fixed << std::setprecision(2);
-        kf_text_ss << "ID: " << selected_object_id
-                   << " Vx: " << predicted_vx
-                   << " Vy: " << predicted_vy
-                   << " (DS:Occluded) (KF:Pred " << selected_object_lost_frames << " fr)";
-
-        draw_text(batch_meta, frame_meta, kf_text_ss.str(),
-                  selected_object_last_bbox.left,
-                  (gint)(selected_object_last_bbox.top - 25) < 0 ? (guint)(selected_object_last_bbox.top + selected_object_last_bbox.height + 5) : (guint)(selected_object_last_bbox.top - 25),
-                  {0.0, 0.0, 0.0, 0.0}, // No background color
-                  selected_color,
-                  12);
-
-        gfloat center_x = selected_object_last_bbox.left + selected_object_last_bbox.width / 2.0;
-        gfloat center_y = selected_object_last_bbox.top + selected_object_last_bbox.height / 2.0;
-        draw_reticule(batch_meta, frame_meta, center_x, center_y, 50.0, selected_color, 1, ReticuleStyle::CROSS_DIAGONAL);
+    // Convert pixel velocity to radians/second
+    double vx_rad_s = 0.0;
+    double vy_rad_s = 0.0;
+    if (current_fps_ > 0.0) {
+        vx_rad_s = (predicted_vx / frame_width) * camera_fov_rad * current_fps_;
+        vy_rad_s = (predicted_vy / frame_height) * camera_fov_v_rad * current_fps_;
     }
+
+    // Draw the bounding box and text
+    draw_bounding_box(batch_meta, frame_meta, current_bbox_params, selected_color, 3);
+    
+    // Determine the status string
+    std::string status_string;
+    switch (status) {
+        case DETECTED:
+            status_string = "STATUS: DETECTED";
+            break;
+        case OCCLUDED:
+            status_string = "STATUS: OCCLUDED (Lost for " + std::to_string(selected_object_lost_frames) + " frames)";
+            break;
+        case TRACKED:
+            status_string = "STATUS: TRACKED";
+            break;
+    }
+
+    // Line 1: ID, Class, Velocity
+    std::stringstream ss_line1;
+    ss_line1 << std::fixed << std::setprecision(3);
+    ss_line1 << "ID: " << selected_object_id
+             << " Class: " << selected_object_class_label
+             << " Vx: " << vx_rad_s << " rad/s"
+             << " Vy: " << vy_rad_s << " rad/s";
+
+    // Line 2: Status and Position
+    std::stringstream ss_line2;
+    ss_line2 << std::fixed << std::setprecision(3);
+    ss_line2 << status_string
+             << " Pos: (" << pos_x_rad << " rad, " << pos_y_rad << " rad)";
+
+    // Calculate text position
+    gint text_y_offset_top = (gint)(current_bbox_params.top - 25) < 0 ? (guint)(current_bbox_params.top + current_bbox_params.height + 5) : (guint)(current_bbox_params.top - 25);
+    gint text_y_offset_bottom = text_y_offset_top + 20;
+
+    // Draw first line of text
+    draw_text(batch_meta, frame_meta, ss_line1.str(),
+              current_bbox_params.left,
+              text_y_offset_top,
+              {0.0, 0.0, 0.0, 0.0},
+              selected_color,
+              12);
+
+    // Draw second line of text (below the first)
+    draw_text(batch_meta, frame_meta, ss_line2.str(),
+              current_bbox_params.left,
+              text_y_offset_bottom,
+              {0.0, 0.0, 0.0, 0.0},
+              selected_color,
+              12);
+
+    // Draw reticule at the center of the bounding box
+    draw_reticule(batch_meta, frame_meta, center_x, center_y, 50.0, selected_color, 1, ReticuleStyle::CROSS_DIAGONAL);
 }
 
 // --- Private Methods ---
@@ -183,7 +203,15 @@ void OSDRenderer::draw_bounding_box(NvDsBatchMeta *batch_meta, NvDsFrameMeta *fr
     }
 }
 
-void OSDRenderer::draw_text(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta, const std::string &text, double x, double y, const NvOSD_ColorParams &bg_color, const NvOSD_ColorParams &text_color, unsigned int font_size)
+void OSDRenderer::draw_text(
+    NvDsBatchMeta *batch_meta,
+    NvDsFrameMeta *frame_meta,
+    const std::string &text,
+    double x,
+    double y,
+    const NvOSD_ColorParams &bg_color,
+    const NvOSD_ColorParams &text_color,
+    unsigned int font_size)
 {
     NvDsDisplayMeta *text_display_meta = nvds_acquire_display_meta_from_pool(batch_meta);
     if (text_display_meta) {
@@ -238,7 +266,7 @@ void OSDRenderer::draw_reticule(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_
             reticule_display_meta->circle_params[0].yc = (guint)center_y;
             reticule_display_meta->circle_params[0].radius = size / 2.0; // Radius based on size
             reticule_display_meta->circle_params[0].circle_color = color;
-            reticule_display_meta->circle_params[0].circle_width = line_width; // Corrected: line_width -> circle_width
+            reticule_display_meta->circle_params[0].circle_width = line_width;
             reticule_display_meta->circle_params[0].has_bg_color = 0; // Outline only
             break;
         }
@@ -264,101 +292,72 @@ void OSDRenderer::draw_reticule(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_
         case ReticuleStyle::CROSS_DIAGONAL: {
             // Calculate a gap size for the lines from the center dot
             const double gap_from_center = line_width * 5.0; // Adjust this value as needed for the desired gap
+            const double half_side = size / 2.0;
 
-            reticule_display_meta->num_lines = 4; // Two diagonals + two horizontal/vertical segments
-            reticule_display_meta->num_circles = 1; // For the central dot
+            // Calculate start and end points for the diagonal lines
+            const double end_x_offset = half_side;
+            const double end_y_offset = half_side;
+            
+            // Check if the lines would be long enough to draw
+            if (gap_from_center < half_side) {
+                // We'll draw 4 lines for the cross
+                reticule_display_meta->num_lines = 4;
+                reticule_display_meta->num_circles = 1; // for the central dot
 
-            // Central dot
-            reticule_display_meta->circle_params[0].xc = (guint)center_x;
-            reticule_display_meta->circle_params[0].yc = (guint)center_y;
-            reticule_display_meta->circle_params[0].radius = line_width; // Size of the dot
-            reticule_display_meta->circle_params[0].circle_color = color;
-            reticule_display_meta->circle_params[0].has_bg_color = 1; // Filled circle
-            reticule_display_meta->circle_params[0].bg_color = color;
-
-            // Calculate diagonal line segment lengths and offsets
-            // Total diagonal length from center to corner is size / (2.0 * sqrt(2.0))
-            // We want to start after gap_from_center
-            const double total_half_diag_length = size / (2.0 * std::sqrt(2.0));
-            const double line_segment_length = total_half_diag_length - gap_from_center;
-
-            if (line_segment_length > 0) { // Only draw if line segment is positive
-                // Calculate offset for start/end points of diagonal segments
-                const double offset_x_start = (gap_from_center / total_half_diag_length) * (size / (2.0 * std::sqrt(2.0)));
-                const double offset_y_start = offset_x_start; // For 45-degree diagonals
-
-                const double offset_x_end = (line_segment_length / total_half_diag_length) * (size / (2.0 * std::sqrt(2.0)));
-                const double offset_y_end = offset_x_end;
+                // Central dot
+                reticule_display_meta->circle_params[0].xc = (guint)center_x;
+                reticule_display_meta->circle_params[0].yc = (guint)center_y;
+                reticule_display_meta->circle_params[0].radius = line_width; // Size of the dot
+                reticule_display_meta->circle_params[0].circle_color = color;
+                reticule_display_meta->circle_params[0].has_bg_color = 1; // Filled circle
+                reticule_display_meta->circle_params[0].bg_color = color;
 
                 // Diagonal 1 (top-left to bottom-right)
-                reticule_display_meta->line_params[0].x1 = (guint)(center_x - offset_x_start);
-                reticule_display_meta->line_params[0].y1 = (guint)(center_y - offset_y_start);
-                reticule_display_meta->line_params[0].x2 = (guint)(center_x - offset_x_end);
-                reticule_display_meta->line_params[0].y2 = (guint)(center_y - offset_y_end);
+                reticule_display_meta->line_params[0].x1 = (guint)(center_x - end_x_offset);
+                reticule_display_meta->line_params[0].y1 = (guint)(center_y - end_y_offset);
+                reticule_display_meta->line_params[0].x2 = (guint)(center_x - gap_from_center);
+                reticule_display_meta->line_params[0].y2 = (guint)(center_y - gap_from_center);
                 reticule_display_meta->line_params[0].line_width = line_width;
                 reticule_display_meta->line_params[0].line_color = color;
 
-                reticule_display_meta->line_params[1].x1 = (guint)(center_x + offset_x_start);
-                reticule_display_meta->line_params[1].y1 = (guint)(center_y + offset_y_start);
-                reticule_display_meta->line_params[1].x2 = (guint)(center_x + offset_x_end);
-                reticule_display_meta->line_params[1].y2 = (guint)(center_y + offset_y_end);
+                reticule_display_meta->line_params[1].x1 = (guint)(center_x + gap_from_center);
+                reticule_display_meta->line_params[1].y1 = (guint)(center_y + gap_from_center);
+                reticule_display_meta->line_params[1].x2 = (guint)(center_x + end_x_offset);
+                reticule_display_meta->line_params[1].y2 = (guint)(center_y + end_y_offset);
                 reticule_display_meta->line_params[1].line_width = line_width;
                 reticule_display_meta->line_params[1].line_color = color;
 
                 // Diagonal 2 (bottom-left to top-right)
-                reticule_display_meta->line_params[2].x1 = (guint)(center_x - offset_x_start);
-                reticule_display_meta->line_params[2].y1 = (guint)(center_y + offset_y_start);
-                reticule_display_meta->line_params[2].x2 = (guint)(center_x - offset_x_end);
-                reticule_display_meta->line_params[2].y2 = (guint)(center_y + offset_y_end);
+                reticule_display_meta->line_params[2].x1 = (guint)(center_x - end_x_offset);
+                reticule_display_meta->line_params[2].y1 = (guint)(center_y + end_y_offset);
+                reticule_display_meta->line_params[2].x2 = (guint)(center_x - gap_from_center);
+                reticule_display_meta->line_params[2].y2 = (guint)(center_y + gap_from_center);
                 reticule_display_meta->line_params[2].line_width = line_width;
                 reticule_display_meta->line_params[2].line_color = color;
 
-                reticule_display_meta->line_params[3].x1 = (guint)(center_x + offset_x_start);
-                reticule_display_meta->line_params[3].y1 = (guint)(center_y - offset_y_start);
-                reticule_display_meta->line_params[3].x2 = (guint)(center_x + offset_x_end);
-                reticule_display_meta->line_params[3].y2 = (guint)(center_y - offset_y_end);
+                reticule_display_meta->line_params[3].x1 = (guint)(center_x + gap_from_center);
+                reticule_display_meta->line_params[3].y1 = (guint)(center_y - gap_from_center);
+                reticule_display_meta->line_params[3].x2 = (guint)(center_x + end_x_offset);
+                reticule_display_meta->line_params[3].y2 = (guint)(center_y - end_y_offset);
                 reticule_display_meta->line_params[3].line_width = line_width;
                 reticule_display_meta->line_params[3].line_color = color;
             } else {
-                // If line segments would be too short/negative, only draw the central dot
                 reticule_display_meta->num_lines = 0;
             }
             break;
         }
-        case ReticuleStyle::NONE: // Fallthrough, handled by initial check
+        case ReticuleStyle::NONE:
         default:
             break;
     }
 
-    // Only add display meta if something was actually drawn
     if (reticule_display_meta->num_lines > 0 || reticule_display_meta->num_circles > 0) {
         nvds_add_display_meta_to_frame(frame_meta, reticule_display_meta);
     } else {
-        // If nothing was drawn, release the acquired display meta back to the pool
-        // This function might not exist in older DeepStream versions.
-        // If compilation fails here, consider commenting out this line.
-        // However, not releasing might lead to memory leaks or resource exhaustion.
-        // nvds_release_display_meta(batch_meta, reticule_display_meta);
+        // Since no display meta was added, we don't need to do anything.
+        // It will be cleaned up automatically as it was not added to a frame.
     }
 }
-
-void OSDRenderer::draw_velocity_arrow(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta, double start_x, double start_y, double end_x, double end_y, const NvOSD_ColorParams &color, unsigned int line_width)
-{
-    NvDsDisplayMeta *arrow_display_meta = nvds_acquire_display_meta_from_pool(batch_meta);
-    if (arrow_display_meta) {
-        arrow_display_meta->num_lines = 1;
-        arrow_display_meta->line_params[0].x1 = (guint)start_x;
-        arrow_display_meta->line_params[0].y1 = (guint)start_y;
-        arrow_display_meta->line_params[0].x2 = (guint)end_x;
-        arrow_display_meta->line_params[0].y2 = (guint)end_y;
-        arrow_display_meta->line_params[0].line_width = line_width;
-        arrow_display_meta->line_params[0].line_color = color;
-        nvds_add_display_meta_to_frame(frame_meta, arrow_display_meta);
-    } else {
-        if (node_) RCLCPP_WARN(node_->get_logger(), "Failed to acquire display meta for velocity arrow.");
-    }
-}
-
 
 void OSDRenderer::set_text_params(
     NvOSD_TextParams *text_params,

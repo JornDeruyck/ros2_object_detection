@@ -105,10 +105,10 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
 
         std::lock_guard<std::mutex> objects_lock(node->tracked_objects_mutex_);
         node->current_tracked_objects_.clear(); // Clear detected objects from previous frame
+        node->current_tracked_classes_.clear();
 
         bool selected_object_found_in_frame = false;
         NvOSD_RectParams current_selected_bbox_detected = {}; // Initialize with default values
-        NvDsObjectMeta *current_selected_obj_meta_ptr = nullptr;
 
         // First pass: Process all detected objects, filter by class, populate ROS message, and identify selected one if present
         for (GList *l_obj = frame_meta->obj_meta_list; l_obj != nullptr; l_obj = l_obj->next)
@@ -119,11 +119,9 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
             // --- Class Filtering Logic ---
             bool is_allowed_class = false;
             if (node->allowed_class_ids_.empty()) {
-                // If allowed_class_ids_ is empty, allow all classes
                 is_allowed_class = true;
             } else {
-                // Check if the object's class ID is in the allowed list
-                for (int allowed_id : node->allowed_class_ids_) {
+                for (long int allowed_id : node->allowed_class_ids_) {
                     if (obj_meta->class_id == allowed_id) {
                         is_allowed_class = true;
                         break;
@@ -132,7 +130,6 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
             }
 
             if (!is_allowed_class) {
-                // If this object's class is not allowed, skip it entirely.
                 obj_meta->rect_params.border_width = 0;
                 obj_meta->rect_params.has_bg_color = 0;
                 if (obj_meta->text_params.display_text) {
@@ -144,14 +141,15 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
             // --- END Class Filtering Logic ---
 
             node->current_tracked_objects_[obj_meta->object_id] = obj_meta->rect_params;
+            node->current_tracked_classes_[obj_meta->object_id] = std::string(obj_meta->obj_label);
             node->populate_ros_detection_message(obj_meta, detection_array_msg);
 
             // Identify the selected object from the current frame's detections
             if (obj_meta->object_id == node->selected_object_id_) {
                 selected_object_found_in_frame = true;
                 current_selected_bbox_detected = obj_meta->rect_params;
-                current_selected_obj_meta_ptr = obj_meta;
-
+                node->selected_object_class_label_ = std::string(obj_meta->obj_label);
+                
                 // For the selected object, we will explicitly manage its OSD later.
                 if (obj_meta->text_params.display_text) {
                     g_free(obj_meta->text_params.display_text);
@@ -168,28 +166,36 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
 
         double predicted_x = 0.0, predicted_y = 0.0;
         double predicted_vx = 0.0, predicted_vy = 0.0;
+        double center_x = 0.0, center_y = 0.0;
 
-        // Manage Kalman Filter state for the selected object (prediction/update/deselection)
-        node->manage_selected_object_kalman_filter(
-            selected_object_found_in_frame,
-            current_selected_bbox_detected,
-            current_selected_obj_meta_ptr,
-            predicted_x, predicted_y, predicted_vx, predicted_vy);
+        TrackingStatus status = node->manage_selected_object_kalman_filter(selected_object_found_in_frame, current_selected_bbox_detected);
+
+        // Get KF predictions for OSD
+        if (node->selected_object_kf_initialized_ && node->selected_object_kf_) {
+            predicted_x = node->selected_object_kf_->getX();
+            predicted_y = node->selected_object_kf_->getY();
+            predicted_vx = node->selected_object_kf_->getVx();
+            predicted_vy = node->selected_object_kf_->getVy();
+            center_x = selected_object_found_in_frame ? (current_selected_bbox_detected.left + current_selected_bbox_detected.width / 2.0) : predicted_x;
+            center_y = selected_object_found_in_frame ? (current_selected_bbox_detected.top + current_selected_bbox_detected.height / 2.0) : predicted_y;
+        }
 
         // After processing all objects and updating KF, render OSD for the selected object if one is active.
-        if (node->selected_object_id_ != UNTRACKED_OBJECT_ID && node->osd_renderer_) {
+        if (node->selected_object_id_ != NO_OBJECT_ID && node->osd_renderer_) {
             node->osd_renderer_->render_selected_object_osd(
                 batch_meta,
                 frame_meta,
                 node->selected_object_id_,
+                node->selected_object_class_label_,
+                status,
                 node->selected_object_kf_initialized_,
                 node->selected_object_last_bbox_,
                 node->selected_object_lost_frames_,
-                node->selected_object_tracker_state_,
                 predicted_vx,
                 predicted_vy,
-                selected_object_found_in_frame,
-                current_selected_obj_meta_ptr
+                center_x,
+                center_y,
+                node->camera_fov_rad_
             );
         }
     } // End of frame loop
@@ -207,13 +213,14 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
     : Node("object_detection_node", options),
       pipeline_(nullptr),
       main_loop_(nullptr),
-      selected_object_id_(UNTRACKED_OBJECT_ID),
+      selected_object_id_(NO_OBJECT_ID),
       selected_object_kf_(nullptr),
       selected_object_kf_initialized_(false),
       selected_object_lost_frames_(0),
-      selected_object_tracker_state_(EMPTY),
+      is_actively_tracking_(false),
       button0_pressed_prev_(false),
-      button1_pressed_prev_(false)
+      button1_pressed_prev_(false),
+      button2_pressed_prev_(false)
 {
     RCLCPP_INFO(this->get_logger(), "Initializing ObjectDetectionNode...");
 
@@ -221,12 +228,13 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
 
     // 1. Declare ALL Parameters
     this->declare_parameter<std::string>("pipeline_string", "");
-    this->declare_parameter<std::vector<int>>("allowed_class_ids", std::vector<int>());
+    this->declare_parameter<std::vector<long int>>("allowed_class_ids", std::vector<long int>());
     this->declare_parameter<std::string>("detection_topic", "detections");
     this->declare_parameter<std::string>("image_topic", "image_raw/compressed");
     this->declare_parameter<std::string>("joy_topic", "/joy");
     this->declare_parameter<bool>("use_qos_reliable", true);
     this->declare_parameter<int>("qos_history_depth", 1);
+    this->declare_parameter<double>("camera_fov", 90.0); // New parameter for camera FOV in degrees
 
 
     // 2. Retrieve Parameter Values
@@ -237,6 +245,8 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
     std::string joy_topic = this->get_parameter("joy_topic").as_string();
     bool use_qos_reliable = this->get_parameter("use_qos_reliable").as_bool();
     int qos_history_depth = this->get_parameter("qos_history_depth").as_int();
+    double camera_fov_deg = this->get_parameter("camera_fov").as_double();
+    camera_fov_rad_ = camera_fov_deg * M_PI / 180.0;
 
     // Log the loaded parameters
     RCLCPP_INFO(this->get_logger(), "Loaded Parameters:");
@@ -246,6 +256,7 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
     RCLCPP_INFO(this->get_logger(), "  joy_topic: %s", joy_topic.c_str());
     RCLCPP_INFO(this->get_logger(), "  use_qos_reliable: %s", use_qos_reliable ? "true" : "false");
     RCLCPP_INFO(this->get_logger(), "  qos_history_depth: %d", qos_history_depth);
+    RCLCPP_INFO(this->get_logger(), "  camera_fov: %.2f degrees (%.4f radians)", camera_fov_deg, camera_fov_rad_);
 
     if (allowed_class_ids_.empty()) {
         RCLCPP_INFO(this->get_logger(), "  allowed_class_ids: (empty - all classes allowed)");
@@ -284,8 +295,7 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
     RCLCPP_INFO(this->get_logger(), "Subscribing to %s topic for joystick input.", joy_topic.c_str());
 
     // Initialize OSDRenderer, passing a raw pointer to this node
-    // This avoids the bad_weak_ptr issue by not calling shared_from_this() in the constructor.
-    osd_renderer_ = std::make_unique<OSDRenderer>(this); // Changed to pass 'this' raw pointer
+    osd_renderer_ = std::make_unique<OSDRenderer>(this);
 
     gst_init(nullptr, nullptr);
     main_loop_ = g_main_loop_new(nullptr, FALSE);
@@ -392,39 +402,13 @@ void ObjectDetectionNode::populate_ros_detection_message(NvDsObjectMeta *obj_met
     detection_array_msg.detections.push_back(detection);
 }
 
-void ObjectDetectionNode::manage_selected_object_kalman_filter(
+TrackingStatus ObjectDetectionNode::manage_selected_object_kalman_filter(
     bool selected_object_found_in_frame,
-    const NvOSD_RectParams &current_selected_bbox_detected,
-    NvDsObjectMeta *current_selected_obj_meta_ptr,
-    double &predicted_x, double &predicted_y,
-    double &predicted_vx, double &predicted_vy)
+    const NvOSD_RectParams &current_selected_bbox_detected)
 {
-    if (selected_object_id_ != UNTRACKED_OBJECT_ID) {
-        if (selected_object_found_in_frame && current_selected_obj_meta_ptr) {
-            bool tracker_meta_found = false;
-            RCLCPP_DEBUG(this->get_logger(), "Selected Object ID %lu: %s. Iterating through user metadata.",
-                         selected_object_id_,
-                         current_selected_obj_meta_ptr->obj_user_meta_list == nullptr ? "obj_user_meta_list is NULL" : "obj_user_meta_list is NOT NULL");
+    TrackingStatus status = DETECTED;
 
-            for (GList *l_user_meta = current_selected_obj_meta_ptr->obj_user_meta_list; l_user_meta != nullptr; l_user_meta = l_user_meta->next) {
-                NvDsUserMeta *user_meta = (NvDsUserMeta *)l_user_meta->data;
-                RCLCPP_DEBUG(this->get_logger(), "  Found user meta type: %d", user_meta->base_meta.meta_type);
-                if (user_meta->base_meta.meta_type == NVDS_TRACKER_METADATA) {
-                    NvDsTargetMiscDataObject *selected_tracker_obj_data = (NvDsTargetMiscDataObject *)user_meta->user_meta_data;
-                    if (selected_tracker_obj_data && selected_tracker_obj_data->numObj > 0) {
-                        selected_object_tracker_state_ = selected_tracker_obj_data->list[0].trackerState;
-                        tracker_meta_found = true;
-                    }
-                    break;
-                }
-            }
-            if (!tracker_meta_found) {
-                RCLCPP_DEBUG(this->get_logger(), "Selected object ID %lu does not have state meta data in this frame. Setting tracker state to EMPTY.",
-                             selected_object_id_);
-                selected_object_tracker_state_ = EMPTY;
-            }
-        }
-
+    if (selected_object_id_ != NO_OBJECT_ID) {
         if (!selected_object_kf_initialized_ || !selected_object_kf_) {
             if (selected_object_found_in_frame) {
                 selected_object_kf_ = std::make_unique<KalmanFilter2D>();
@@ -434,9 +418,11 @@ void ObjectDetectionNode::manage_selected_object_kalman_filter(
                 selected_object_kf_initialized_ = true;
                 selected_object_lost_frames_ = 0;
                 selected_object_last_bbox_ = current_selected_bbox_detected;
+                status = DETECTED;
             } else {
                 RCLCPP_DEBUG(this->get_logger(), "Selected object %lu not found and KF not initialized. Will deselect if not found soon.",
                              selected_object_id_);
+                status = DETECTED;
             }
         } else {
             selected_object_kf_->predict();
@@ -447,45 +433,48 @@ void ObjectDetectionNode::manage_selected_object_kalman_filter(
                 selected_object_kf_->update(center_x, center_y);
                 selected_object_lost_frames_ = 0;
                 selected_object_last_bbox_ = current_selected_bbox_detected;
+                status = DETECTED;
             } else {
                 selected_object_lost_frames_++;
-                RCLCPP_DEBUG(this->get_logger(), "Selected object ID %lu KF predicting. Frames lost: %u (DS state: %d)",
-                             selected_object_id_, selected_object_lost_frames_, selected_object_tracker_state_);
+                RCLCPP_DEBUG(this->get_logger(), "Selected object ID %lu KF predicting. Frames lost: %u",
+                             selected_object_id_, selected_object_lost_frames_);
 
-                if (selected_object_lost_frames_ > KF_LOST_THRESHOLD && selected_object_tracker_state_ == EMPTY)
+                if (selected_object_lost_frames_ > KF_LOST_THRESHOLD)
                 {
-                    RCLCPP_INFO(this->get_logger(), "Selected object ID %lu lost by KF (predicted for %u frames) and DeepStream tracker state is EMPTY. Deselecting.",
+                    RCLCPP_INFO(this->get_logger(), "Selected object ID %lu lost by KF (predicted for %u frames). Deselecting.",
                                 selected_object_id_, selected_object_lost_frames_);
-                    selected_object_id_ = UNTRACKED_OBJECT_ID;
+                    selected_object_id_ = NO_OBJECT_ID;
                     selected_object_kf_initialized_ = false;
                     selected_object_kf_.reset();
                     selected_object_lost_frames_ = 0;
-                    selected_object_tracker_state_ = EMPTY;
+                    status = DETECTED; // Reset to default
+                } else {
+                    // Update last known bbox with predicted position for OSD rendering
+                    double predicted_x = selected_object_kf_->getX();
+                    double predicted_y = selected_object_kf_->getY();
+                    selected_object_last_bbox_.left = predicted_x - selected_object_last_bbox_.width / 2.0;
+                    selected_object_last_bbox_.top = predicted_y - selected_object_last_bbox_.height / 2.0;
+                    status = OCCLUDED;
                 }
             }
         }
-
-        if (selected_object_kf_initialized_ && selected_object_kf_) {
-            predicted_x = selected_object_kf_->getX();
-            predicted_y = selected_object_kf_->getY();
-            predicted_vx = selected_object_kf_->getVx();
-            predicted_vy = selected_object_kf_->getVy();
-
-            selected_object_last_bbox_.left = predicted_x - selected_object_last_bbox_.width / 2.0;
-            selected_object_last_bbox_.top = predicted_y - selected_object_last_bbox_.height / 2.0;
-        } else {
-            predicted_x = 0.0; predicted_y = 0.0; predicted_vx = 0.0; predicted_vy = 0.0;
-        }
     }
     else {
+        // No object is selected, so reset all state
         if (selected_object_kf_initialized_ || selected_object_kf_) {
             selected_object_kf_initialized_ = false;
             selected_object_kf_.reset();
             selected_object_lost_frames_ = 0;
         }
-        selected_object_tracker_state_ = EMPTY;
-        predicted_x = 0.0; predicted_y = 0.0; predicted_vx = 0.0; predicted_vy = 0.0;
+        status = DETECTED; // Default state when no object is selected
     }
+    
+    // Override the status to TRACKED if the toggle button is pressed
+    if (selected_object_id_ != NO_OBJECT_ID && is_actively_tracking_) {
+        status = TRACKED;
+    }
+    
+    return status;
 }
 
 // --- Method to cycle through detected targets ---
@@ -495,11 +484,12 @@ void ObjectDetectionNode::cycle_selected_target(bool forward)
 
     if (current_tracked_objects_.empty())
     {
-        selected_object_id_ = UNTRACKED_OBJECT_ID;
+        selected_object_id_ = NO_OBJECT_ID;
         selected_object_kf_initialized_ = false;
         selected_object_kf_.reset();
         selected_object_lost_frames_ = 0;
-        selected_object_tracker_state_ = EMPTY;
+        selected_object_class_label_ = "";
+        is_actively_tracking_ = false;
         RCLCPP_INFO(this->get_logger(), "No objects currently detected to select.");
         return;
     }
@@ -513,7 +503,7 @@ void ObjectDetectionNode::cycle_selected_target(bool forward)
 
     auto it = std::find(object_ids.begin(), object_ids.end(), selected_object_id_);
 
-    if (it == object_ids.end() || selected_object_id_ == UNTRACKED_OBJECT_ID)
+    if (it == object_ids.end() || selected_object_id_ == NO_OBJECT_ID)
     {
         if (forward) {
             selected_object_id_ = object_ids[0];
@@ -549,7 +539,7 @@ void ObjectDetectionNode::cycle_selected_target(bool forward)
     selected_object_kf_initialized_ = false;
     selected_object_kf_.reset();
     selected_object_lost_frames_ = 0;
-    selected_object_tracker_state_ = EMPTY;
+    is_actively_tracking_ = false;
 }
 
 // --- Callback for joystick input ---
@@ -557,9 +547,11 @@ void ObjectDetectionNode::joy_callback(const sensor_msgs::msg::Joy::SharedPtr ms
 {
     const int FORWARD_BUTTON_INDEX = 0;
     const int BACKWARD_BUTTON_INDEX = 1;
+    const int TRACK_BUTTON_INDEX = 2; // New button for "TRACKED" state
 
     bool current_button0_pressed = (msg->buttons.size() > FORWARD_BUTTON_INDEX && msg->buttons[FORWARD_BUTTON_INDEX] == 1);
     bool current_button1_pressed = (msg->buttons.size() > BACKWARD_BUTTON_INDEX && msg->buttons[BACKWARD_BUTTON_INDEX] == 1);
+    bool current_button2_pressed = (msg->buttons.size() > TRACK_BUTTON_INDEX && msg->buttons[TRACK_BUTTON_INDEX] == 1);
 
     if (current_button0_pressed && !button0_pressed_prev_)
     {
@@ -571,9 +563,19 @@ void ObjectDetectionNode::joy_callback(const sensor_msgs::msg::Joy::SharedPtr ms
         RCLCPP_INFO(this->get_logger(), "Joystick button %d pressed. Cycling target backward.", BACKWARD_BUTTON_INDEX);
         cycle_selected_target(false);
     }
+    else if (current_button2_pressed && !button2_pressed_prev_)
+    {
+        if (selected_object_id_ != NO_OBJECT_ID) {
+            is_actively_tracking_ = !is_actively_tracking_;
+            RCLCPP_INFO(this->get_logger(), "Joystick button %d pressed. Toggling 'TRACKED' state to: %s", TRACK_BUTTON_INDEX, is_actively_tracking_ ? "true" : "false");
+        } else {
+            RCLCPP_WARN(this->get_logger(), "Cannot toggle 'TRACKED' state. No object is currently selected.");
+        }
+    }
 
     button0_pressed_prev_ = current_button0_pressed;
     button1_pressed_prev_ = current_button1_pressed;
+    button2_pressed_prev_ = current_button2_pressed;
 }
 
 // --- Main entrypoint ---
