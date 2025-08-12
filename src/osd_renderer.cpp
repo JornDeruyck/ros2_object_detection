@@ -5,6 +5,10 @@
 #include <sstream>
 #include <algorithm> // For std::max
 
+// --- Constants for OSD ---
+const int FONT_SIZE = 8;
+const char* FONT_NAME = "Sans";
+
 // Helper to format numbers for stable OSD text
 std::string format_fixed_width(double value, int width, int precision) {
     std::stringstream ss;
@@ -46,31 +50,22 @@ void OSDRenderer::update_and_display_fps(NvDsBatchMeta *batch_meta, NvDsFrameMet
 
 void OSDRenderer::render_non_selected_object_osd(NvDsBatchMeta* batch_meta, NvDsFrameMeta* frame_meta, NvDsObjectMeta *obj_meta)
 {
-    std::stringstream ss_label_conf;
-    ss_label_conf << obj_meta->obj_label << " ID:" << obj_meta->object_id;
+    // Standardized label format: CLASS ID
+    std::stringstream label;
+    label << obj_meta->obj_label << " " << obj_meta->object_id;
 
-    // Suppress the default OSD from nvdsosd completely
-    obj_meta->rect_params.border_width = 0;
-    if (obj_meta->text_params.display_text) {
-        g_free(obj_meta->text_params.display_text);
-        obj_meta->text_params.display_text = nullptr;
-    }
-
-    // Draw our own custom bounding box by adding new display metadata
     draw_bounding_box(batch_meta, frame_meta, obj_meta->rect_params, blue_color_, 2);
 
-    // --- Centering Logic for Non-Selected Objects ---
     const int avg_char_width = 7;
     const double bbox_center_x = obj_meta->rect_params.left + obj_meta->rect_params.width / 2.0;
-    double text_x_pos = bbox_center_x - (ss_label_conf.str().length() * avg_char_width / 2.0);
+    double text_x_pos = bbox_center_x - (label.str().length() * avg_char_width / 2.0);
     text_x_pos = std::max(0.0, text_x_pos);
 
     gint text_y_pos = (gint)(obj_meta->rect_params.top - 20) < 0
         ? (guint)(obj_meta->rect_params.top + obj_meta->rect_params.height + 5)
         : (guint)(obj_meta->rect_params.top - 20);
 
-    // Draw our own custom text by adding new display metadata
-    draw_text(batch_meta, frame_meta, ss_label_conf.str(), text_x_pos, text_y_pos, blue_color_);
+    draw_text(batch_meta, frame_meta, label.str(), text_x_pos, text_y_pos, blue_color_);
 }
 
 void OSDRenderer::render_selected_object_osd(
@@ -109,12 +104,13 @@ void OSDRenderer::render_selected_object_osd(
         status_string = "LOCKED";
     } else {
         status_string = (status == OSDTrackingStatus::DETECTED) 
-            ? "DETECTED" 
+            ? "SELECTED" 
             : "OCCLUDED (" + std::to_string(selected_object_lost_frames) + "f)";
     }
 
+    // Standardized label format with status appended
     std::stringstream ss_line1, ss_line2;
-    ss_line1 << "ID: " << selected_object_id << " " << selected_object_class_label << " | " << status_string;
+    ss_line1 << selected_object_class_label << " " << selected_object_id << " | " << status_string;
     ss_line2 << "P:(" << format_fixed_width(pos_x_rad, 6, 3) << "," << format_fixed_width(pos_y_rad, 6, 3) << ") "
              << "V:(" << format_fixed_width(vx_rad_s, 6, 3) << "," << format_fixed_width(vy_rad_s, 6, 3) << ") rad";
 
@@ -251,8 +247,8 @@ void OSDRenderer::set_text_params(NvOSD_TextParams *text_params, guint x_offset,
     text_params->display_text = g_strdup(display_text.c_str());
     text_params->x_offset = x_offset;
     text_params->y_offset = y_offset;
-    text_params->font_params.font_name = (gchar *)"Sans";
-    text_params->font_params.font_size = 8;
+    text_params->font_params.font_name = (gchar *)FONT_NAME;
+    text_params->font_params.font_size = FONT_SIZE;
     text_params->font_params.font_color = font_color;
     if (with_backdrop) {
         text_params->set_bg_clr = 1;
