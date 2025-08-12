@@ -24,11 +24,11 @@
 #include "nvds_tracker_meta.h"
 
 #include "sensor_msgs/msg/compressed_image.hpp"
-#include "sensor_msgs/msg/joy.hpp"
 #include "std_msgs/msg/u_int64.hpp"
 #include "vision_msgs/msg/detection2_d.hpp"
 #include "vision_msgs/msg/detection2_d_array.hpp"
 #include "vision_msgs/msg/object_hypothesis_with_pose.hpp"
+#include "std_srvs/srv/trigger.hpp"
 
 // Helper function to convert NvBbox_Coords to NvOSD_RectParams
 static NvOSD_RectParams bbox_coords_to_rect_params(const NvBbox_Coords& coords) {
@@ -43,155 +43,23 @@ static NvOSD_RectParams bbox_coords_to_rect_params(const NvBbox_Coords& coords) 
     return params;
 }
 
-GstFlowReturn ObjectDetectionNode::new_sample_callback(GstElement *sink, gpointer user_data)
-{
-    auto *node = static_cast<ObjectDetectionNode *>(user_data);
-    GstSample *sample = nullptr;
-    g_signal_emit_by_name(sink, "pull-sample", &sample);
-    if (!sample) return GST_FLOW_OK;
-    GstBuffer *buffer = gst_sample_get_buffer(sample);
-    if (!buffer) {
-        gst_sample_unref(sample);
-        return GST_FLOW_ERROR;
-    }
-    GstMapInfo map;
-    if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-        auto msg = sensor_msgs::msg::CompressedImage();
-        msg.header.stamp = node->get_clock()->now();
-        msg.header.frame_id = "camera_frame";
-        msg.format = "jpeg";
-        msg.data.assign(map.data, map.data + map.size);
-        node->compressed_publisher_->publish(msg);
-        gst_buffer_unmap(buffer, &map);
-    }
-    gst_sample_unref(sample);
-    return GST_FLOW_OK;
-}
-
-GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstPadProbeInfo *info, gpointer user_data)
-{
-    auto *node = static_cast<ObjectDetectionNode *>(user_data);
-    GstBuffer *gst_buffer = (GstBuffer *)info->data;
-    NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(gst_buffer);
-    if (!batch_meta) return GST_PAD_PROBE_OK;
-
-    vision_msgs::msg::Detection2DArray detection_array_msg;
-    detection_array_msg.header.stamp = node->get_clock()->now();
-    detection_array_msg.header.frame_id = "camera_frame";
-
-    for (GList *l_frame = batch_meta->frame_meta_list; l_frame != nullptr; l_frame = l_frame->next)
-    {
-        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)l_frame->data;
-        if (!frame_meta) continue;
-
-        if (node->osd_renderer_) node->osd_renderer_->update_and_display_fps(batch_meta, frame_meta);
-
-        std::lock_guard<std::mutex> objects_lock(node->tracked_objects_mutex_);
-        node->current_tracked_objects_.clear();
-        node->current_tracked_classes_.clear();
-        
-        const NvDsObjectMeta* selected_obj_meta = nullptr;
-
-        for (GList *l_obj = frame_meta->obj_meta_list; l_obj != nullptr; l_obj = l_obj->next)
-        {
-            NvDsObjectMeta *obj_meta = (NvDsObjectMeta *)l_obj->data;
-            if (!obj_meta) continue;
-
-            bool is_allowed_class = node->allowed_class_ids_.empty();
-            if (!is_allowed_class) {
-                for (long int allowed_id : node->allowed_class_ids_) {
-                    if (obj_meta->class_id == allowed_id) {
-                        is_allowed_class = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!is_allowed_class) {
-                obj_meta->rect_params.border_width = 0;
-                if (obj_meta->text_params.display_text) {
-                    g_free(obj_meta->text_params.display_text);
-                    obj_meta->text_params.display_text = nullptr;
-                }
-                continue;
-            }
-
-            node->current_tracked_objects_[obj_meta->object_id] = bbox_coords_to_rect_params(obj_meta->tracker_bbox_info.org_bbox_coords);
-            node->current_tracked_classes_[obj_meta->object_id] = std::string(obj_meta->obj_label);
-            node->populate_ros_detection_message(obj_meta, detection_array_msg);
-
-            if (obj_meta->object_id == node->selected_object_id_) {
-                selected_obj_meta = obj_meta;
-                if (obj_meta->text_params.display_text) {
-                    g_free(obj_meta->text_params.display_text);
-                    obj_meta->text_params.display_text = nullptr;
-                }
-                obj_meta->rect_params.border_width = 0;
-            } else {
-                if (node->osd_renderer_) {
-                    node->osd_renderer_->render_non_selected_object_osd(batch_meta, frame_meta, obj_meta);
-                }
-            }
-        }
-
-        if (node->selected_object_id_ != NO_OBJECT_ID) {
-            OSDTrackingStatus status = node->manage_selected_object_state(selected_obj_meta);
-            
-            bool is_locked = (node->selected_object_id_ == node->locked_target_id_);
-            double pred_vx = 0.0, pred_vy = 0.0;
-            NvOSD_RectParams bbox_to_render = {};
-
-            if (node->selected_object_kf_initialized_) {
-                pred_vx = node->selected_object_kf_->getVx();
-                pred_vy = node->selected_object_kf_->getVy();
-                bbox_to_render = node->selected_object_last_bbox_;
-                bbox_to_render.left = node->selected_object_kf_->getX() - bbox_to_render.width / 2.0;
-                bbox_to_render.top = node->selected_object_kf_->getY() - bbox_to_render.height / 2.0;
-            }
-            
-            if (node->osd_renderer_ && node->selected_object_kf_initialized_) {
-                node->osd_renderer_->render_selected_object_osd(
-                    batch_meta, frame_meta, node->selected_object_id_, node->selected_object_class_label_,
-                    status, is_locked, bbox_to_render, node->selected_object_lost_frames_,
-                    pred_vx, pred_vy, node->camera_fov_rad_
-                );
-            }
-        }
-    }
-
-    if (!detection_array_msg.detections.empty()) {
-        node->detection_publisher_->publish(detection_array_msg);
-    }
-
-    return GST_PAD_PROBE_OK;
-}
+// --- Class Constructor and Destructor (Restructured) ---
 
 ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
     : Node("object_detection_node", options),
       pipeline_(nullptr), main_loop_(nullptr),
-      selected_object_id_(NO_OBJECT_ID), locked_target_id_(NO_OBJECT_ID),
-      selected_object_kf_(nullptr), selected_object_kf_initialized_(false),
-      selected_object_lost_frames_(0),
-      button0_pressed_prev_(false), button1_pressed_prev_(false), button2_pressed_prev_(false)
+      selected_object_id_(NO_OBJECT_ID), locked_target_id_(NO_OBJECT_ID)
 {
     RCLCPP_INFO(this->get_logger(), "Initializing ObjectDetectionNode...");
-    memset(&selected_object_last_bbox_, 0, sizeof(NvOSD_RectParams));
     this->declare_parameter<std::string>("pipeline_string", "");
     this->declare_parameter<std::vector<long int>>("allowed_class_ids", std::vector<long int>());
-    this->declare_parameter<std::string>("detection_topic", "detections");
-    this->declare_parameter<std::string>("selected_target_topic", "selected_target_id");
     this->declare_parameter<std::string>("image_topic", "image_raw/compressed");
-    this->declare_parameter<std::string>("joy_topic", "/joy");
     this->declare_parameter<bool>("use_qos_reliable", true);
     this->declare_parameter<int>("qos_history_depth", 1);
     this->declare_parameter<double>("camera_fov", 90.0);
 
     std::string pipeline_string = this->get_parameter("pipeline_string").as_string();
     allowed_class_ids_ = this->get_parameter("allowed_class_ids").as_integer_array();
-    std::string detection_topic = this->get_parameter("detection_topic").as_string();
-    std::string selected_target_topic = this->get_parameter("selected_target_topic").as_string();
-    std::string image_topic = this->get_parameter("image_topic").as_string();
-    std::string joy_topic = this->get_parameter("joy_topic").as_string();
     bool use_qos_reliable = this->get_parameter("use_qos_reliable").as_bool();
     int qos_history_depth = this->get_parameter("qos_history_depth").as_int();
     double camera_fov_deg = this->get_parameter("camera_fov").as_double();
@@ -206,11 +74,27 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
     if (use_qos_reliable) qos_profile.reliable(); else qos_profile.best_effort();
     qos_profile.durability_volatile();
 
-    detection_publisher_ = this->create_publisher<vision_msgs::msg::Detection2DArray>(detection_topic, qos_profile);
-    compressed_publisher_ = this->create_publisher<sensor_msgs::msg::CompressedImage>(image_topic, qos_profile);
-    selected_target_publisher_ = this->create_publisher<std_msgs::msg::UInt64>(selected_target_topic, qos_profile);
-    joy_subscription_ = this->create_subscription<sensor_msgs::msg::Joy>(joy_topic, 10, std::bind(&ObjectDetectionNode::joy_callback, this, std::placeholders::_1));
+    detection_publisher_ = this->create_publisher<vision_msgs::msg::Detection2DArray>("~/detections", qos_profile);
+    target_publisher_ = this->create_publisher<vision_msgs::msg::Detection2D>("~/target", qos_profile);
+    compressed_publisher_ = this->create_publisher<sensor_msgs::msg::CompressedImage>("~/image_compressed", qos_profile);
     osd_renderer_ = std::make_unique<OSDRenderer>(this);
+
+    lock_target_service_ = this->create_service<std_srvs::srv::Trigger>(
+        "~/lock_target",
+        std::bind(&ObjectDetectionNode::handle_lock_target, this, std::placeholders::_1, std::placeholders::_2));
+    
+    unlock_target_service_ = this->create_service<std_srvs::srv::Trigger>(
+        "~/unlock_target",
+        std::bind(&ObjectDetectionNode::handle_unlock_target, this, std::placeholders::_1, std::placeholders::_2));
+
+    cycle_target_forward_service_ = this->create_service<std_srvs::srv::Trigger>(
+        "~/cycle_target_forward",
+        std::bind(&ObjectDetectionNode::handle_cycle_forward, this, std::placeholders::_1, std::placeholders::_2));
+    
+    cycle_target_backward_service_ = this->create_service<std_srvs::srv::Trigger>(
+        "~/cycle_target_backward",
+        std::bind(&ObjectDetectionNode::handle_cycle_backward, this, std::placeholders::_1, std::placeholders::_2));
+
     gst_init(nullptr, nullptr);
     main_loop_ = g_main_loop_new(nullptr, FALSE);
     GError *error = nullptr;
@@ -252,160 +136,293 @@ ObjectDetectionNode::~ObjectDetectionNode()
     RCLCPP_INFO(this->get_logger(), "ObjectDetectionNode shut down complete.");
 }
 
-void ObjectDetectionNode::populate_ros_detection_message(NvDsObjectMeta *obj_meta, vision_msgs::msg::Detection2DArray &detection_array_msg)
+// --- GStreamer Callbacks ---
+
+GstFlowReturn ObjectDetectionNode::new_sample_callback(GstElement *sink, gpointer user_data)
 {
-    vision_msgs::msg::Detection2D detection;
-    detection.header.stamp = detection_array_msg.header.stamp;
-    detection.header.frame_id = detection_array_msg.header.frame_id;
+    auto *node = static_cast<ObjectDetectionNode *>(user_data);
+    GstSample *sample = nullptr;
+    g_signal_emit_by_name(sink, "pull-sample", &sample);
+    if (!sample) return GST_FLOW_OK;
+    GstBuffer *buffer = gst_sample_get_buffer(sample);
+    if (!buffer) {
+        gst_sample_unref(sample);
+        return GST_FLOW_ERROR;
+    }
+    GstMapInfo map;
+    if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+        auto msg = sensor_msgs::msg::CompressedImage();
+        msg.header.stamp = node->get_clock()->now();
+        msg.header.frame_id = "camera_frame";
+        msg.format = "jpeg";
+        msg.data.assign(map.data, map.data + map.size);
+        node->compressed_publisher_->publish(msg);
+        gst_buffer_unmap(buffer, &map);
+    }
+    gst_sample_unref(sample);
+    return GST_FLOW_OK;
+}
+
+GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstPadProbeInfo *info, gpointer user_data)
+{
+    auto *node = static_cast<ObjectDetectionNode *>(user_data);
+    GstBuffer *gst_buffer = (GstBuffer *)info->data;
+    NvDsBatchMeta *batch_meta = gst_buffer_get_nvds_batch_meta(gst_buffer);
+    if (!batch_meta) return GST_PAD_PROBE_OK;
+
+    const rclcpp::Time current_stamp = node->get_clock()->now();
+    vision_msgs::msg::Detection2DArray detection_array_msg;
+    detection_array_msg.header.stamp = current_stamp;
+    detection_array_msg.header.frame_id = "camera_frame";
+
+    std::lock_guard<std::mutex> lock(node->tracked_objects_mutex_);
+
+    // Step 1: Mark all existing objects as potentially unseen and create a map of current frame metadata
+    std::map<guint64, NvDsObjectMeta*> current_frame_meta_map;
+    for (auto& pair : node->persistent_object_map_) {
+        pair.second.frames_since_seen++;
+    }
+
+    // Step 2: Update map with currently visible objects
+    for (GList *l_frame = batch_meta->frame_meta_list; l_frame != nullptr; l_frame = l_frame->next)
+    {
+        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *)l_frame->data;
+        if (!frame_meta) continue;
+
+        if (node->osd_renderer_) {
+            double center_x = frame_meta->source_frame_width / 2.0;
+            double center_y = frame_meta->source_frame_height / 2.0;
+            double crosshair_size = 50.0;
+            node->osd_renderer_->update_and_display_fps(batch_meta, frame_meta);
+            node->osd_renderer_->draw_reticule(batch_meta, frame_meta, center_x, center_y, crosshair_size, node->osd_renderer_->white_color_, 2, ReticuleStyle::CROSS_GAP);
+        }
+
+        for (GList *l_obj = frame_meta->obj_meta_list; l_obj != nullptr; l_obj = l_obj->next)
+        {
+            NvDsObjectMeta *obj_meta = (NvDsObjectMeta *)l_obj->data;
+            if (!obj_meta) continue;
+
+            // Clear default OSD first
+            obj_meta->rect_params.border_width = 0;
+            obj_meta->rect_params.has_bg_color = 0;
+            if (obj_meta->text_params.display_text) {
+                g_free(obj_meta->text_params.display_text);
+                obj_meta->text_params.display_text = nullptr;
+            }
+
+            bool is_allowed_class = node->allowed_class_ids_.empty() ||
+                (std::find(node->allowed_class_ids_.begin(), node->allowed_class_ids_.end(), obj_meta->class_id) != node->allowed_class_ids_.end());
+            
+            if (is_allowed_class) {
+                // Update state in persistent map
+                auto& object_state = node->persistent_object_map_[obj_meta->object_id];
+                object_state.id = obj_meta->object_id;
+                object_state.class_label = std::string(obj_meta->obj_label);
+                object_state.confidence = obj_meta->confidence;
+                object_state.last_bbox = bbox_coords_to_rect_params(obj_meta->tracker_bbox_info.org_bbox_coords);
+                object_state.frames_since_seen = 0;
+
+                double center_x = object_state.last_bbox.left + object_state.last_bbox.width / 2.0;
+                double center_y = object_state.last_bbox.top + object_state.last_bbox.height / 2.0;
+                if (!object_state.kf_initialized) {
+                    object_state.kf = std::make_unique<KalmanFilter2D>();
+                    object_state.kf->init(center_x, center_y);
+                    object_state.kf_initialized = true;
+                } else {
+                    object_state.kf->predict();
+                    object_state.kf->update(center_x, center_y);
+                }
+                // Store the meta pointer for rendering later
+                current_frame_meta_map[obj_meta->object_id] = obj_meta;
+            }
+        }
+    }
+
+    // Step 3: Populate messages, render OSD based on state, and prune lost objects
+    for (auto it = node->persistent_object_map_.begin(); it != node->persistent_object_map_.end(); )
+    {
+        auto& object_state = it->second;
+
+        if (object_state.frames_since_seen > KF_LOST_THRESHOLD) {
+            if (object_state.id == node->locked_target_id_) node->locked_target_id_ = NO_OBJECT_ID;
+            if (object_state.id == node->selected_object_id_) node->selected_object_id_ = NO_OBJECT_ID;
+            it = node->persistent_object_map_.erase(it);
+            continue;
+        }
+
+        if (object_state.frames_since_seen > 0) {
+            object_state.kf->predict();
+        }
+
+        vision_msgs::msg::Detection2D detection_msg;
+        node->populate_ros_detection_message(object_state, detection_msg, current_stamp);
+        detection_array_msg.detections.push_back(detection_msg);
+
+        // --- New OSD Rendering Logic ---
+        if (node->osd_renderer_) {
+            OSDTrackingStatus status = (object_state.frames_since_seen == 0) ? OSDTrackingStatus::DETECTED : OSDTrackingStatus::OCCLUDED;
+            NvOSD_RectParams bbox_to_render = object_state.last_bbox;
+            if (status == OSDTrackingStatus::OCCLUDED) {
+                bbox_to_render.left = object_state.kf->getX() - bbox_to_render.width / 2.0;
+                bbox_to_render.top = object_state.kf->getY() - bbox_to_render.height / 2.0;
+            }
+
+            // Render locked target with highest priority
+            if (object_state.id == node->locked_target_id_) {
+                node->osd_renderer_->render_selected_object_osd(
+                    batch_meta, (NvDsFrameMeta*)batch_meta->frame_meta_list->data, object_state.id, object_state.class_label,
+                    status, true, bbox_to_render, object_state.frames_since_seen,
+                    object_state.kf->getVx(), object_state.kf->getVy(), node->camera_fov_rad_
+                );
+            } 
+            // Render selected target (if not also the locked one)
+            else if (object_state.id == node->selected_object_id_) {
+                node->osd_renderer_->render_selected_object_osd(
+                    batch_meta, (NvDsFrameMeta*)batch_meta->frame_meta_list->data, object_state.id, object_state.class_label,
+                    status, false, bbox_to_render, object_state.frames_since_seen,
+                    object_state.kf->getVx(), object_state.kf->getVy(), node->camera_fov_rad_
+                );
+            }
+            // Render regular, visible objects
+            else if (status == OSDTrackingStatus::DETECTED) {
+                auto meta_it = current_frame_meta_map.find(object_state.id);
+                if (meta_it != current_frame_meta_map.end()) {
+                    node->osd_renderer_->render_non_selected_object_osd(batch_meta, (NvDsFrameMeta*)batch_meta->frame_meta_list->data, meta_it->second);
+                }
+            }
+        }
+        ++it;
+    }
+
+    // Step 4: Publish topics
+    if (!detection_array_msg.detections.empty()) {
+        node->detection_publisher_->publish(detection_array_msg);
+    }
+
+    vision_msgs::msg::Detection2D target_msg;
+    auto it = node->persistent_object_map_.find(node->locked_target_id_);
+    if (node->locked_target_id_ != NO_OBJECT_ID && it != node->persistent_object_map_.end()) {
+        node->populate_ros_detection_message(it->second, target_msg, current_stamp);
+    } else {
+        target_msg.header.stamp = current_stamp;
+        target_msg.header.frame_id = "camera_frame";
+        target_msg.id = "-1";
+    }
+    node->target_publisher_->publish(target_msg);
+
+    return GST_PAD_PROBE_OK;
+}
+
+
+// --- Member Function Implementations ---
+
+void ObjectDetectionNode::handle_lock_target(
+  const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+  std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+    std::lock_guard<std::mutex> lock(tracked_objects_mutex_);
+    if (selected_object_id_ != NO_OBJECT_ID) {
+        locked_target_id_ = selected_object_id_;
+        RCLCPP_INFO(this->get_logger(), "Target locked: %ld", locked_target_id_);
+        response->success = true;
+        response->message = "Target locked: " + std::to_string(locked_target_id_);
+    } else {
+        RCLCPP_WARN(this->get_logger(), "No target selected to lock.");
+        response->success = false;
+        response->message = "No target selected to lock.";
+    }
+}
+
+void ObjectDetectionNode::handle_unlock_target(
+  const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+  std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+    std::lock_guard<std::mutex> lock(tracked_objects_mutex_);
+    RCLCPP_INFO(this->get_logger(), "Target unlocked.");
+    locked_target_id_ = NO_OBJECT_ID;
+    response->success = true;
+    response->message = "Target unlocked.";
+}
+
+void ObjectDetectionNode::handle_cycle_forward(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+    cycle_selected_target(true);
+    response->success = true;
+    response->message = "Cycled target forward";
+}
+
+void ObjectDetectionNode::handle_cycle_backward(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+    cycle_selected_target(false);
+    response->success = true;
+    response->message = "Cycled target backward";
+}
+
+void ObjectDetectionNode::populate_ros_detection_message(const TrackedObjectState& object_state, vision_msgs::msg::Detection2D& detection_msg, const rclcpp::Time& stamp)
+{
+    detection_msg.header.stamp = stamp;
+    detection_msg.header.frame_id = "camera_frame";
+    
     vision_msgs::msg::ObjectHypothesisWithPose hypothesis;
-    hypothesis.hypothesis.class_id = std::string(obj_meta->obj_label);
-    hypothesis.hypothesis.score = obj_meta->confidence;
-    detection.results.push_back(hypothesis);
-    const auto& tracker_bbox = obj_meta->tracker_bbox_info.org_bbox_coords;
-    detection.bbox.center.position.x = tracker_bbox.left + tracker_bbox.width / 2.0;
-    detection.bbox.center.position.y = tracker_bbox.top + tracker_bbox.height / 2.0;
-    detection.bbox.size_x = tracker_bbox.width;
-    detection.bbox.size_y = tracker_bbox.height;
-    detection.id = std::to_string(obj_meta->object_id);
-    detection_array_msg.detections.push_back(detection);
+    hypothesis.hypothesis.class_id = object_state.class_label;
+    hypothesis.hypothesis.score = (object_state.frames_since_seen == 0) ? object_state.confidence : 0.0;
+    detection_msg.results.push_back(hypothesis);
+
+    if (object_state.frames_since_seen == 0) {
+        detection_msg.bbox.center.position.x = object_state.last_bbox.left + object_state.last_bbox.width / 2.0;
+        detection_msg.bbox.center.position.y = object_state.last_bbox.top + object_state.last_bbox.height / 2.0;
+        detection_msg.bbox.size_x = object_state.last_bbox.width;
+        detection_msg.bbox.size_y = object_state.last_bbox.height;
+    } else {
+        detection_msg.bbox.center.position.x = object_state.kf->getX();
+        detection_msg.bbox.center.position.y = object_state.kf->getY();
+        detection_msg.bbox.size_x = object_state.last_bbox.width;
+        detection_msg.bbox.size_y = object_state.last_bbox.height;
+    }
+
+    detection_msg.id = std::to_string(object_state.id);
 }
 
 void ObjectDetectionNode::cycle_selected_target(bool forward)
 {
     std::lock_guard<std::mutex> lock(tracked_objects_mutex_);
 
-    // If there are no objects, always deselect.
-    if (current_tracked_objects_.empty()) {
+    if (persistent_object_map_.empty()) {
         if (selected_object_id_ != NO_OBJECT_ID) {
             RCLCPP_INFO(this->get_logger(), "No objects detected. Deselecting target.");
             selected_object_id_ = NO_OBJECT_ID;
         }
-        // Reset KF state when deselecting
-        selected_object_kf_initialized_ = false;
-        selected_object_kf_.reset();
-        selected_object_lost_frames_ = 0;
         return;
     }
 
     std::vector<guint64> object_ids;
-    for (const auto& pair : current_tracked_objects_) {
+    for (const auto& pair : persistent_object_map_) {
         object_ids.push_back(pair.first);
     }
     std::sort(object_ids.begin(), object_ids.end());
 
     auto it = std::find(object_ids.begin(), object_ids.end(), selected_object_id_);
 
-    // Case 1: No object is currently selected.
     if (it == object_ids.end()) {
         selected_object_id_ = forward ? object_ids.front() : object_ids.back();
         RCLCPP_INFO(this->get_logger(), "No object selected. Selecting first/last: %lu", selected_object_id_);
-    }
-    // Case 2: An object is selected.
-    else {
-        if (forward) {
-            it++; // Move to next position
-            // If we were at the last element, deselect.
-            if (it == object_ids.end()) {
-                RCLCPP_INFO(this->get_logger(), "Cycled past last object. Deselecting.");
-                selected_object_id_ = NO_OBJECT_ID;
-            } else {
-                selected_object_id_ = *it;
-                RCLCPP_INFO(this->get_logger(), "Cycled forward to new object: %lu", selected_object_id_);
-            }
-        } else { // backward
-            // If we were at the first element, deselect.
-            if (it == object_ids.begin()) {
-                RCLCPP_INFO(this->get_logger(), "Cycled before first object. Deselecting.");
-                selected_object_id_ = NO_OBJECT_ID;
-            } else {
-                it--; // Move to previous
-                selected_object_id_ = *it;
-                RCLCPP_INFO(this->get_logger(), "Cycled backward to new object: %lu", selected_object_id_);
-            }
-        }
-    }
-
-    // Reset KF state on any change of selection (including deselection).
-    selected_object_kf_initialized_ = false;
-    selected_object_kf_.reset();
-    selected_object_lost_frames_ = 0;
-}
-
-void ObjectDetectionNode::joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
-{
-    const int FORWARD_BUTTON_INDEX = 0;
-    const int BACKWARD_BUTTON_INDEX = 1;
-    const int LOCK_BUTTON_INDEX = 2;
-    bool fwd_pressed = (msg->buttons.size() > FORWARD_BUTTON_INDEX && msg->buttons[FORWARD_BUTTON_INDEX] == 1);
-    bool back_pressed = (msg->buttons.size() > BACKWARD_BUTTON_INDEX && msg->buttons[BACKWARD_BUTTON_INDEX] == 1);
-    bool lock_pressed = (msg->buttons.size() > LOCK_BUTTON_INDEX && msg->buttons[LOCK_BUTTON_INDEX] == 1);
-    if (fwd_pressed && !button0_pressed_prev_) cycle_selected_target(true);
-    if (back_pressed && !button1_pressed_prev_) cycle_selected_target(false);
-    if (lock_pressed && !button2_pressed_prev_) {
-        if (locked_target_id_ == selected_object_id_ && locked_target_id_ != NO_OBJECT_ID) {
-            locked_target_id_ = NO_OBJECT_ID;
-            RCLCPP_INFO(this->get_logger(), "Joystick: Unlocking target.");
-        } else if (selected_object_id_ != NO_OBJECT_ID) {
-            locked_target_id_ = selected_object_id_;
-            RCLCPP_INFO(this->get_logger(), "Joystick: Locking target ID %lu.", locked_target_id_);
-        } else {
-            locked_target_id_ = NO_OBJECT_ID;
-            RCLCPP_WARN(this->get_logger(), "Joystick: No target selected to lock.");
-        }
-        auto id_msg = std_msgs::msg::UInt64();
-        id_msg.data = locked_target_id_;
-        selected_target_publisher_->publish(id_msg);
-    }
-    button0_pressed_prev_ = fwd_pressed;
-    button1_pressed_prev_ = back_pressed;
-    button2_pressed_prev_ = lock_pressed;
-}
-
-OSDTrackingStatus ObjectDetectionNode::manage_selected_object_state(const NvDsObjectMeta* selected_obj_meta)
-{
-    if (!selected_object_kf_initialized_) {
-        if (selected_obj_meta) {
-            const auto& tracker_bbox = selected_obj_meta->tracker_bbox_info.org_bbox_coords;
-            double center_x = tracker_bbox.left + tracker_bbox.width / 2.0;
-            double center_y = tracker_bbox.top + tracker_bbox.height / 2.0;
-            selected_object_kf_ = std::make_unique<KalmanFilter2D>();
-            selected_object_kf_->init(center_x, center_y);
-            selected_object_kf_initialized_ = true;
-            selected_object_class_label_ = std::string(selected_obj_meta->obj_label);
-            selected_object_last_bbox_ = bbox_coords_to_rect_params(tracker_bbox);
-        } else {
-            return OSDTrackingStatus::DETECTED;
-        }
-    }
-
-    selected_object_kf_->predict();
-
-    if (selected_obj_meta) {
-        const auto& tracker_bbox = selected_obj_meta->tracker_bbox_info.org_bbox_coords;
-        double center_x = tracker_bbox.left + tracker_bbox.width / 2.0;
-        double center_y = tracker_bbox.top + tracker_bbox.height / 2.0;
-        selected_object_kf_->update(center_x, center_y);
-        
-        selected_object_lost_frames_ = 0;
-        selected_object_last_bbox_ = bbox_coords_to_rect_params(tracker_bbox);
-        selected_object_class_label_ = std::string(selected_obj_meta->obj_label);
-        return OSDTrackingStatus::DETECTED;
     } else {
-        selected_object_lost_frames_++;
-        if (selected_object_lost_frames_ > KF_LOST_THRESHOLD) {
-            RCLCPP_INFO(this->get_logger(), "Target %lu lost for too long. Deselecting.", selected_object_id_);
-            if (selected_object_id_ == locked_target_id_) {
-                locked_target_id_ = NO_OBJECT_ID;
-                auto msg = std_msgs::msg::UInt64();
-                msg.data = 0;
-                selected_target_publisher_->publish(msg);
-            }
-            selected_object_id_ = NO_OBJECT_ID;
-            selected_object_kf_initialized_ = false;
-            selected_object_kf_.reset();
-            return OSDTrackingStatus::DETECTED;
+        if (forward) {
+            it++;
+            selected_object_id_ = (it == object_ids.end()) ? NO_OBJECT_ID : *it;
+        } else {
+            selected_object_id_ = (it == object_ids.begin()) ? NO_OBJECT_ID : *(--it);
         }
-        return OSDTrackingStatus::OCCLUDED;
+    }
+
+    if (selected_object_id_ == NO_OBJECT_ID) {
+        RCLCPP_INFO(this->get_logger(), "Cycled to deselection.");
+    } else {
+        RCLCPP_INFO(this->get_logger(), "Cycled to new object: %lu", selected_object_id_);
     }
 }
 

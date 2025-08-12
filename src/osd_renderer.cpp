@@ -41,7 +41,7 @@ void OSDRenderer::update_and_display_fps(NvDsBatchMeta *batch_meta, NvDsFrameMet
     }
     
     std::string fps_text = "FPS: " + std::to_string(static_cast<int>(current_fps_));
-    draw_text(batch_meta, frame_meta, fps_text, 10, 10, white_color_);
+    draw_text(batch_meta, frame_meta, fps_text, 5, 5, white_color_);
 }
 
 void OSDRenderer::render_non_selected_object_osd(NvDsBatchMeta* batch_meta, NvDsFrameMeta* frame_meta, NvDsObjectMeta *obj_meta)
@@ -60,14 +60,14 @@ void OSDRenderer::render_non_selected_object_osd(NvDsBatchMeta* batch_meta, NvDs
     draw_bounding_box(batch_meta, frame_meta, obj_meta->rect_params, blue_color_, 2);
 
     // --- Centering Logic for Non-Selected Objects ---
-    const int avg_char_width = 8;
+    const int avg_char_width = 7;
     const double bbox_center_x = obj_meta->rect_params.left + obj_meta->rect_params.width / 2.0;
     double text_x_pos = bbox_center_x - (ss_label_conf.str().length() * avg_char_width / 2.0);
     text_x_pos = std::max(0.0, text_x_pos);
 
-    gint text_y_pos = (gint)(obj_meta->rect_params.top - 30) < 0
+    gint text_y_pos = (gint)(obj_meta->rect_params.top - 20) < 0
         ? (guint)(obj_meta->rect_params.top + obj_meta->rect_params.height + 5)
-        : (guint)(obj_meta->rect_params.top - 30);
+        : (guint)(obj_meta->rect_params.top - 20);
 
     // Draw our own custom text by adding new display metadata
     draw_text(batch_meta, frame_meta, ss_label_conf.str(), text_x_pos, text_y_pos, blue_color_);
@@ -95,7 +95,7 @@ void OSDRenderer::render_selected_object_osd(
     double center_y = current_bbox_params.top + current_bbox_params.height / 2.0;
 
     draw_bounding_box(batch_meta, frame_meta, current_bbox_params, selected_color, 1);
-    draw_reticule(batch_meta, frame_meta, center_x, center_y, 50.0, selected_color, 2, ReticuleStyle::CROSS_DIAGONAL);
+    draw_reticule(batch_meta, frame_meta, center_x, center_y, 50.0, selected_color, 1, ReticuleStyle::CROSS_DIAGONAL);
 
     const double aspect_ratio = (double)frame_meta->source_frame_width / frame_meta->source_frame_height;
     const double camera_fov_v_rad = 2.0 * std::atan(std::tan(camera_fov_rad / 2.0) / aspect_ratio);
@@ -119,7 +119,7 @@ void OSDRenderer::render_selected_object_osd(
              << "V:(" << format_fixed_width(vx_rad_s, 6, 3) << "," << format_fixed_width(vy_rad_s, 6, 3) << ") rad";
 
     const double bbox_center_x = current_bbox_params.left + current_bbox_params.width / 2.0;
-    const int avg_char_width = 8;
+    const int avg_char_width = 7;
 
     double x_line1 = bbox_center_x - (ss_line1.str().length() * avg_char_width / 2.0);
     double x_line2 = bbox_center_x - (ss_line2.str().length() * avg_char_width / 2.0);
@@ -127,12 +127,12 @@ void OSDRenderer::render_selected_object_osd(
     x_line2 = std::max(0.0, x_line2);
 
     gint y_line1, y_line2;
-    if ((gint)current_bbox_params.top > 30) {
-        y_line1 = current_bbox_params.top - 30;
+    if ((gint)current_bbox_params.top > 20) {
+        y_line1 = current_bbox_params.top - 20;
         y_line2 = current_bbox_params.top + 0;
     } else {
         y_line1 = current_bbox_params.top + current_bbox_params.height + 0;
-        y_line2 = y_line1 + 30;
+        y_line2 = y_line1 + 20;
     }
 
     draw_text(batch_meta, frame_meta, ss_line1.str(), x_line1, y_line1, selected_color);
@@ -165,10 +165,13 @@ void OSDRenderer::draw_text(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta
 void OSDRenderer::draw_reticule(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta, double center_x, double center_y, double size, const NvOSD_ColorParams &color, unsigned int line_width, ReticuleStyle style)
 {
     if (style == ReticuleStyle::NONE) return;
+
     NvDsDisplayMeta *reticule_display_meta = nvds_acquire_display_meta_from_pool(batch_meta);
     if (!reticule_display_meta) return;
+
     reticule_display_meta->num_lines = 0;
     reticule_display_meta->num_circles = 0;
+
     switch (style) {
         case ReticuleStyle::POINT:
             reticule_display_meta->num_circles = 1;
@@ -197,8 +200,44 @@ void OSDRenderer::draw_reticule(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_
             }
             break;
         }
+        case ReticuleStyle::CROSS_GAP: {
+        const double gap = line_width * 5.0;
+        const double half_size = size / 2.0;
+
+        reticule_display_meta->num_lines = 4;
+
+        // Left segment of horizontal line (left of gap)
+        reticule_display_meta->line_params[0] = {
+            (guint)(center_x - half_size), (guint)center_y,
+            (guint)(center_x - gap), (guint)center_y,
+            line_width, color
+        };
+
+        // Right segment of horizontal line (right of gap)
+        reticule_display_meta->line_params[1] = {
+            (guint)(center_x + gap), (guint)center_y,
+            (guint)(center_x + half_size), (guint)center_y,
+            line_width, color
+        };
+
+        // Top segment of vertical line (above gap)
+        reticule_display_meta->line_params[2] = {
+            (guint)center_x, (guint)(center_y - half_size),
+            (guint)center_x, (guint)(center_y - gap),
+            line_width, color
+        };
+
+        // Bottom segment of vertical line (below gap)
+        reticule_display_meta->line_params[3] = {
+            (guint)center_x, (guint)(center_y + gap),
+            (guint)center_x, (guint)(center_y + half_size),
+            line_width, color
+        };
+        break;
+    }
         default: break;
     }
+
     if (reticule_display_meta->num_lines > 0 || reticule_display_meta->num_circles > 0) {
         nvds_add_display_meta_to_frame(frame_meta, reticule_display_meta);
     }
@@ -213,7 +252,7 @@ void OSDRenderer::set_text_params(NvOSD_TextParams *text_params, guint x_offset,
     text_params->x_offset = x_offset;
     text_params->y_offset = y_offset;
     text_params->font_params.font_name = (gchar *)"Sans";
-    text_params->font_params.font_size = 12;
+    text_params->font_params.font_size = 8;
     text_params->font_params.font_color = font_color;
     if (with_backdrop) {
         text_params->set_bg_clr = 1;

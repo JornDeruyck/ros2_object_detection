@@ -11,8 +11,8 @@ TargetLogicNode::TargetLogicNode(const rclcpp::NodeOptions &options)
     this->declare_parameter<std::string>("detection_topic", "/detections");
     this->declare_parameter<std::string>("selected_target_topic", "/selected_target_id");
     this->declare_parameter<std::string>("tracking_error_topic", "/tracking_error");
-    this->declare_parameter<int>("frame_width", 1920);
-    this->declare_parameter<int>("frame_height", 1080);
+    this->declare_parameter<int>("frame_width", 1280);
+    this->declare_parameter<int>("frame_height", 720);
     this->declare_parameter<double>("camera_fov", 90.0); // Horizontal FOV in degrees
 
     auto detection_topic = this->get_parameter("detection_topic").as_string();
@@ -42,7 +42,7 @@ TargetLogicNode::TargetLogicNode(const rclcpp::NodeOptions &options)
     qos_profile.reliable();
 
     // --- Subscriptions ---
-    target_id_subscription_ = this->create_subscription<std_msgs::msg::UInt64>(
+    target_id_subscription_ = this->create_subscription<std_msgs::msg::Int64>(
         selected_target_topic, qos_profile,
         std::bind(&TargetLogicNode::target_id_callback, this, std::placeholders::_1));
 
@@ -52,38 +52,92 @@ TargetLogicNode::TargetLogicNode(const rclcpp::NodeOptions &options)
 
     // --- Publisher ---
     tracking_error_publisher_ = this->create_publisher<geometry_msgs::msg::Point>(tracking_error_topic, qos_profile);
+
+    // --- Service clients ---
+    tracking_client_ = this->create_client<std_srvs::srv::Trigger>("/pat_controller/operational/tracking");
+    automatic_client_ = this->create_client<std_srvs::srv::Trigger>("/pat_controller/operational/automatic");
+
 }
 
 // --- Callbacks ---
 
-void TargetLogicNode::target_id_callback(const std_msgs::msg::UInt64::SharedPtr msg)
+void TargetLogicNode::target_id_callback(const std_msgs::msg::Int64::SharedPtr msg)
 {
     if (msg->data != target_id_to_track_)
     {
         target_id_to_track_ = msg->data;
-        if (target_id_to_track_ == 0) {
-            RCLCPP_INFO(this->get_logger(), "Tracking disabled (received target ID 0).");
-            auto error_msg = geometry_msgs::msg::Point();
+
+        auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
+
+        if (target_id_to_track_ < 0)
+        {
+            RCLCPP_INFO(this->get_logger(), "Tracking disabled (received target ID -1).");
+
+            geometry_msgs::msg::Point error_msg;
             error_msg.x = 0.0;
             error_msg.y = 0.0;
             error_msg.z = 0.0;
             tracking_error_publisher_->publish(error_msg);
-        } else {
+
+            if (automatic_client_->wait_for_service(std::chrono::seconds(1)))
+            {
+                automatic_client_->async_send_request(
+                    request,
+                    [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+                        auto response = future.get();
+                        if (response->success)
+                        {
+                            RCLCPP_INFO(this->get_logger(), "Switched to automatic mode: %s", response->message.c_str());
+                        }
+                        else
+                        {
+                            RCLCPP_WARN(this->get_logger(), "Failed to switch to automatic mode: %s", response->message.c_str());
+                        }
+                    });
+            }
+            else
+            {
+                RCLCPP_WARN(this->get_logger(), "Automatic service not available.");
+            }
+        }
+        else
+        {
             RCLCPP_INFO(this->get_logger(), "New target to track with ID: %lu", target_id_to_track_);
+
+            if (tracking_client_->wait_for_service(std::chrono::seconds(1)))
+            {
+                tracking_client_->async_send_request(
+                    request,
+                    [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+                        auto response = future.get();
+                        if (response->success)
+                        {
+                            RCLCPP_INFO(this->get_logger(), "Switched to tracking mode: %s", response->message.c_str());
+                        }
+                        else
+                        {
+                            RCLCPP_WARN(this->get_logger(), "Failed to switch to tracking mode: %s", response->message.c_str());
+                        }
+                    });
+            }
+            else
+            {
+                RCLCPP_WARN(this->get_logger(), "Tracking service not available.");
+            }
         }
     }
 }
 
 void TargetLogicNode::detection_callback(const vision_msgs::msg::Detection2DArray::SharedPtr msg)
 {
-    if (target_id_to_track_ <= 0) {
+    if (target_id_to_track_ < 0) {
         return;
     }
 
     bool target_found = false;
     for (const auto &detection : msg->detections)
     {
-        uint64_t current_detection_id = 0;
+        int64_t current_detection_id = -1;
         try {
             current_detection_id = std::stoull(detection.id);
         } catch (const std::exception&) {
@@ -116,7 +170,7 @@ void TargetLogicNode::detection_callback(const vision_msgs::msg::Detection2DArra
         error_msg.y = 0.0;
         error_msg.z = 0.0;
         tracking_error_publisher_->publish(error_msg);
-        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Target ID %lu not found in current detections.", target_id_to_track_);
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Target ID %ld not found in current detections.", target_id_to_track_);
     }
 }
 

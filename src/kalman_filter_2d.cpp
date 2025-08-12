@@ -1,3 +1,4 @@
+
 // src/kalman_filter_2d.cpp
 #include "ros2_object_detection/kalman_filter_2d.hpp"
 
@@ -46,8 +47,8 @@ KalmanFilter2D::KalmanFilter2D() {
     // is expected to deviate from a constant model between predictions).
     // Tune these values based on how "smooth" vs. "responsive" you want the filter to be.
     // Higher values make the filter trust its prediction less, leading to faster adaptation but more jitter.
-    double process_noise_pos = 1.0;  // Variance in position (pixels^2) per frame for unmodeled acceleration
-    double process_noise_vel = 0.5;  // Variance in velocity (pixels/frame)^2 per frame for velocity changes
+    double process_noise_pos = 10.0;  // Variance in position (pixels^2) per frame for unmodeled acceleration
+    double process_noise_vel = 5.0;  // Variance in velocity (pixels/frame)^2 per frame for velocity changes
     Q << process_noise_pos, 0, 0, 0,
          0, process_noise_pos, 0, 0,
          0, 0, process_noise_vel, 0,

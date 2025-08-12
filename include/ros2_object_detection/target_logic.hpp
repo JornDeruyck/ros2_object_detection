@@ -5,7 +5,9 @@
 #include <rclcpp/rclcpp.hpp>
 #include "vision_msgs/msg/detection2_d_array.hpp"
 #include "std_msgs/msg/u_int64.hpp"
+#include "std_msgs/msg/int64.hpp"
 #include "geometry_msgs/msg/point.hpp"
+#include "std_srvs/srv/trigger.hpp"
 
 #include <string>
 
@@ -32,7 +34,7 @@ private:
      * @brief Callback for when a new target ID is selected for tracking.
      * @param msg The message containing the ID of the target to track.
      */
-    void target_id_callback(const std_msgs::msg::UInt64::SharedPtr msg);
+    void target_id_callback(const std_msgs::msg::Int64::SharedPtr msg);
 
     /**
      * @brief Callback for processing incoming object detections.
@@ -41,14 +43,18 @@ private:
     void detection_callback(const vision_msgs::msg::Detection2DArray::SharedPtr msg);
 
     // --- ROS 2 Subscriptions ---
-    rclcpp::Subscription<std_msgs::msg::UInt64>::SharedPtr target_id_subscription_;
+    rclcpp::Subscription<std_msgs::msg::Int64>::SharedPtr target_id_subscription_;
     rclcpp::Subscription<vision_msgs::msg::Detection2DArray>::SharedPtr detection_subscription_;
+
+    // --- service clients ---
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr tracking_client_;
+    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr automatic_client_;
 
     // --- ROS 2 Publisher ---
     rclcpp::Publisher<geometry_msgs::msg::Point>::SharedPtr tracking_error_publisher_;
 
     // --- Node State ---
-    uint64_t target_id_to_track_; ///< The ID of the object we are currently trying to track.
+    int64_t target_id_to_track_; ///< The ID of the object we are currently trying to track.
 
     // --- Parameters ---
     int frame_width_;          ///< Width of the camera frame in pixels.

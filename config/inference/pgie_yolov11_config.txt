@@ -4,12 +4,12 @@
 gpu-id=0
 net-scale-factor=0.0039215697906911373
 model-color-format=0
-onnx-file=../../models/yolov11l.onnx
+onnx-file=../../models/yolo11l.onnx
 
-model-engine-file=../yolov11l_b1_gpu0_fp32.engine
+model-engine-file=../yolo11l_b1_gpu0_int8.engine
 labelfile-path=../../models/labels.txt
 batch-size=1
-network-mode=0 # 0=FP32, 1=INT8, 2=FP16 (Keep FP32 as per the previous working config)
+network-mode=2 # 0=FP32, 1=INT8, 2=FP16 (Keep FP32 as per the previous working config)
 num-detected-classes=80
 interval=0
 gie-unique-id=1
@@ -20,10 +20,10 @@ maintain-aspect-ratio=1
 symmetric-padding=1
 infer-dims=3;1280;1280
 parse-bbox-func-name=NvDsInferParseYoloCuda
-custom-lib-path=/home/jorn-deruyck/ros2/src/DeepStream-Yolo/nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so
+custom-lib-path=/home/def/git/DeepStream-Yolo/nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so
 engine-create-func-name=NvDsInferYoloCudaEngineGet
 
 [class-attrs-all]
 nms-iou-threshold=0.45
-pre-cluster-threshold=0.25
-topk=300
+pre-cluster-threshold=0.15
+topk=100

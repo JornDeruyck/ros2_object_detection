@@ -41,6 +41,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         SetEnvironmentVariable(name='GST_DEBUG', value=gst_debug_level),
-        object_detection_node,
-        target_logic_node
+        SetEnvironmentVariable(name='DISPLAY', value=":1"),
+        SetEnvironmentVariable(name='RMW_IMPLEMENTATION', value="rmw_cyclonedds_cpp"),
+        object_detection_node
     ])

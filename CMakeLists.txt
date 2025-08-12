@@ -17,6 +17,7 @@ find_package(image_transport REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(yaml-cpp REQUIRED)
+find_package(std_srvs REQUIRED)
 
 # Find GStreamer, GLib, and yaml-cpp
 pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0 gstreamer-app-1.0)
@@ -63,6 +64,7 @@ ament_target_dependencies(object_detection_node
   image_transport
   Eigen3
   std_msgs
+  std_srvs
 )
 
 # Add dependencies for the new target logic node
@@ -71,6 +73,7 @@ ament_target_dependencies(target_logic_node
   std_msgs
   vision_msgs
   geometry_msgs
+  std_srvs
 )
 
 # Add include directories for all targets

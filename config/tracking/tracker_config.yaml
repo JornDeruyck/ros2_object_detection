@@ -12,7 +12,7 @@
 ####################################################################################################
 
 BaseConfig:
-  minDetectorConfidence: 0.1    # If the confidence of a detector bbox is lower than this, then it won't be considered for tracking
+  minDetectorConfidence: 0.05    # If the confidence of a detector bbox is lower than this, then it won't be considered for tracking
 
 TargetManagement:
   enableBboxUnClipping: 1    # In case the bbox is likely to be clipped by image border, unclip bbox
@@ -21,10 +21,10 @@ TargetManagement:
 
   # [Creation & Termination Policy]
   minIouDiff4NewTarget: 0.7418    # If the IOU between the newly detected object and any of the existing targets is higher than this threshold, this newly detected object will be discarded.
-  minTrackerConfidence: 0.7    # If the confidence of an object tracker is lower than this on the fly, then it will be tracked in shadow mode. Valid Range: [0.0, 1.0]
-  probationAge: 20    # If the target's age exceeds this, the target will be considered to be valid.
-  maxShadowTrackingAge: 200    # Max length of shadow tracking. If the shadowTrackingAge exceeds this limit, the tracker will be terminated.
-  earlyTerminationAge: 5    # If the shadowTrackingAge reaches this threshold while in TENTATIVE period, the target will be terminated prematurely.
+  minTrackerConfidence: 0.6    # If the confidence of an object tracker is lower than this on the fly, then it will be tracked in shadow mode. Valid Range: [0.0, 1.0]
+  probationAge: 10    # If the target's age exceeds this, the target will be considered to be valid.
+  maxShadowTrackingAge: 300    # Max length of shadow tracking. If the shadowTrackingAge exceeds this limit, the tracker will be terminated.
+  earlyTerminationAge: 10    # If the shadowTrackingAge reaches this threshold while in TENTATIVE period, the target will be terminated prematurely.
 
   outputTerminatedTracks: 1  # Output total frame history for terminated tracks to the tracker plugin for downstream usage
   outputShadowTracks: 1      # Output shadow track state information to the tracker plugin for downstream usage
@@ -34,9 +34,9 @@ TrajectoryManagement:
   enableReAssoc: 1    # Enable Re-Assoc
 
   # [Re-Assoc Metric: Thresholds for valid candidates]
-  minMatchingScore4Overall: 0.6622    # min matching score for overall
-  minTrackletMatchingScore: 0.2940    # min tracklet similarity score for re-assoc
-  minMatchingScore4ReidSimilarity: 0.0771    # min reid similarity score for re-assoc
+  minMatchingScore4Overall: 0.5    # min matching score for overall
+  minTrackletMatchingScore: 0.2    # min tracklet similarity score for re-assoc
+  minMatchingScore4ReidSimilarity: 0.05    # min reid similarity score for re-assoc
 
   # [Re-Assoc Metric: Weights]
   matchingScoreWeight4TrackletSimilarity: 0.7981    # weight for tracklet similarity score
@@ -78,25 +78,25 @@ StateEstimator:
   stateEstimatorType: 2    # Type of state estimator among { DUMMY=0, SIMPLE=1, REGULAR=2, SIMPLE_LOC=3 }
 
   # [Dynamics Modeling]
-  processNoiseVar4Loc: 6810.8668    # Process noise variance for bbox center
-  processNoiseVar4Size: 1541.8647   # Process noise variance for bbox size
-  processNoiseVar4Vel: 1348.4874    # Process noise variance for velocity
-  measurementNoiseVar4Detector: 100.0000   # Measurement noise variance for detector's detection
-  measurementNoiseVar4Tracker: 293.3238    # Measurement noise variance for tracker's localization
+  processNoiseVar4Loc: 12000.0   # Process noise variance for bbox center
+  processNoiseVar4Size: 3000.0   # Process noise variance for bbox size
+  processNoiseVar4Vel: 2500.0    # Process noise variance for velocity
+  measurementNoiseVar4Detector: 50.0000   # Measurement noise variance for detector's detection
+  measurementNoiseVar4Tracker: 200.0    # Measurement noise variance for tracker's localization
 
 VisualTracker:
   visualTrackerType: 1    # the type of visual tracker among { DUMMY=0, NvDCF=1 }
 
   # [NvDCF: Feature Extraction]
   useColorNames: 1    # Use ColorNames feature
-  useHog: 0    # Use Histogram-of-Oriented-Gradient (HOG) feature
+  useHog: 1    # Use Histogram-of-Oriented-Gradient (HOG) feature
   featureImgSizeLevel: 2    # Size of a feature image. Valid range: {1, 2, 3, 4, 5}, from the smallest to the largest
   featureFocusOffsetFactor_y: -0.2000    # The offset for the center of hanning window relative to the feature height. The center of hanning window would move by (featureFocusOffsetFactor_y*featureMatSize.height) in vertical direction
 
   # [NvDCF: Correlation Filter]
-  filterLr: 0.0750    # learning rate for DCF filter in exponential moving average. Valid Range: [0.0, 1.0]
+  filterLr: 0.04            # learning rate for DCF filter in exponential moving average. Valid Range: [0.0, 1.0]
   filterChannelWeightsLr: 0.1000    # learning rate for the channel weights among feature channels. Valid Range: [0.0, 1.0]
-  gaussianSigma: 0.7500    # Standard deviation for Gaussian for desired response when creating DCF filter [pixels]
+  gaussianSigma: 1.2    # Standard deviation for Gaussian for desired response when creating DCF filter [pixels]
 
 ObjectModelProjection:
   cameraModelFilepath: ""
