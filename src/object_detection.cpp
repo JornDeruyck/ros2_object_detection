@@ -118,6 +118,12 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
         g_signal_connect(appsink, "new-sample", G_CALLBACK(new_sample_callback), this);
         gst_object_unref(appsink);
     }
+
+    // Connect to the element-added signal to catch dynamically created elements
+    g_signal_connect(pipeline_, "element-added", G_CALLBACK(element_added_callback), this);
+
+    add_latency_probes(GST_BIN(pipeline_));
+
     gst_element_set_state(pipeline_, GST_STATE_PLAYING);
     gstreamer_thread_ = std::thread([this]() { g_main_loop_run(main_loop_); });
     RCLCPP_INFO(this->get_logger(), "ObjectDetectionNode fully initialized.");
@@ -194,6 +200,10 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
             double center_y = frame_meta->source_frame_height / 2.0;
             double crosshair_size = 50.0;
             node->osd_renderer_->update_and_display_fps(batch_meta, frame_meta);
+            // Display latency information
+            if (!node->latency_map_.empty()) {
+                node->osd_renderer_->display_latency(batch_meta, frame_meta, node->smoothed_latency_map_);
+            }
             node->osd_renderer_->draw_reticule(batch_meta, frame_meta, center_x, center_y, crosshair_size, node->osd_renderer_->white_color_, 2, ReticuleStyle::CROSS_GAP);
         }
 
@@ -310,11 +320,116 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
     }
     node->target_publisher_->publish(target_msg);
 
+    // --- Latency Calculation and Cleanup ---
+    auto latency_it = node->latency_map_.find(gst_buffer);
+    if (latency_it != node->latency_map_.end()) {
+        const auto& timestamps = latency_it->second;
+        const double EMA_ALPHA = 0.05; // Smoothing factor. Lower is smoother.
+
+        for (auto const& [key, val] : timestamps) {
+            if (key.find("_sink") != std::string::npos) {
+                std::string base_name = key.substr(0, key.find("_sink"));
+                auto src_it = timestamps.find(base_name + "_src");
+                if (src_it != timestamps.end()) {
+                    std::chrono::duration<double, std::milli> ms = src_it->second - val;
+                    double current_latency = ms.count();
+
+                    // Apply Exponential Moving Average
+                    auto smooth_it = node->smoothed_latency_map_.find(base_name);
+                    if (smooth_it != node->smoothed_latency_map_.end()) {
+                        smooth_it->second = (EMA_ALPHA * current_latency) + (1.0 - EMA_ALPHA) * smooth_it->second;
+                    } else {
+                        node->smoothed_latency_map_[base_name] = current_latency;
+                    }
+                }
+            }
+        }
+        // Clean up the per-buffer timestamp map to prevent memory leak
+        node->latency_map_.erase(latency_it);
+    }
+
     return GST_PAD_PROBE_OK;
 }
 
 
 // --- Member Function Implementations ---
+
+GstPadProbeReturn ObjectDetectionNode::latency_probe_sink(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
+    auto *node = static_cast<ObjectDetectionNode *>(user_data);
+    GstBuffer *buf = GST_BUFFER(info->data);
+    GstElement *parent_element = gst_pad_get_parent_element(pad);
+    std::string element_name = gst_element_get_name(parent_element);
+    gst_object_unref(parent_element);
+
+    node->latency_map_[buf][element_name + "_sink"] = std::chrono::steady_clock::now();
+    return GST_PAD_PROBE_OK;
+}
+
+GstPadProbeReturn ObjectDetectionNode::latency_probe_src(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
+    auto *node = static_cast<ObjectDetectionNode *>(user_data);
+    GstBuffer *buf = GST_BUFFER(info->data);
+    GstElement *parent_element = gst_pad_get_parent_element(pad);
+    std::string element_name = gst_element_get_name(parent_element);
+    gst_object_unref(parent_element);
+
+    node->latency_map_[buf][element_name + "_src"] = std::chrono::steady_clock::now();
+    return GST_PAD_PROBE_OK;
+}
+
+void ObjectDetectionNode::element_added_callback(GstBin * /*bin*/, GstElement *element, gpointer user_data) {
+    auto *node = static_cast<ObjectDetectionNode *>(user_data);
+    const gchar* name = gst_element_get_name(element);
+    RCLCPP_DEBUG(node->get_logger(), "Element added: %s", name);
+
+    // Add probe to sink pad
+    GstPad *sinkpad = gst_element_get_static_pad(element, "sink");
+    if (sinkpad) {
+        gst_pad_add_probe(sinkpad, GST_PAD_PROBE_TYPE_BUFFER, latency_probe_sink, node, nullptr);
+        gst_object_unref(sinkpad);
+    }
+    // Note: We don't add to src pads here as they might not exist yet.
+    // The initial add_latency_probes will get most of them, and this catches
+    // the dynamically created ones.
+}
+
+void ObjectDetectionNode::add_latency_probes(GstBin *bin) {
+    GstIterator *it = gst_bin_iterate_elements(bin);
+    GValue item = G_VALUE_INIT;
+    bool done = false;
+
+    while (!done) {
+        switch (gst_iterator_next(it, &item)) {
+            case GST_ITERATOR_OK: {
+                GstElement *element = GST_ELEMENT(g_value_get_object(&item));
+                if (GST_IS_BIN(element)) {
+                    add_latency_probes(GST_BIN(element));
+                } else {
+                    // Add probe to sink pad
+                    GstPad *sinkpad = gst_element_get_static_pad(element, "sink");
+                    if (sinkpad) {
+                        gst_pad_add_probe(sinkpad, GST_PAD_PROBE_TYPE_BUFFER, latency_probe_sink, this, nullptr);
+                        gst_object_unref(sinkpad);
+                    }
+                    // Add probe to src pad
+                    GstPad *srcpad = gst_element_get_static_pad(element, "src");
+                    if (srcpad) {
+                        gst_pad_add_probe(srcpad, GST_PAD_PROBE_TYPE_BUFFER, latency_probe_src, this, nullptr);
+                        gst_object_unref(srcpad);
+                    }
+                }
+                g_value_unset(&item);
+                break;
+            }
+            case GST_ITERATOR_RESYNC:
+                gst_iterator_resync(it);
+                break;
+            case GST_ITERATOR_DONE:
+                done = true;
+                break;
+        }
+    }
+    gst_iterator_free(it);
+}
 
 void ObjectDetectionNode::handle_lock_target(
   const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,

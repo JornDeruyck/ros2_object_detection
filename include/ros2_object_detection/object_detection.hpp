@@ -86,6 +86,12 @@ private:
     // Static GStreamer Callbacks
     static GstFlowReturn new_sample_callback(GstElement *sink, gpointer user_data);
     static GstPadProbeReturn osd_probe_callback(GstPad *pad, GstPadProbeInfo *info, gpointer user_data);
+    
+    // --- Latency Measurement Callbacks & Helpers ---
+    void add_latency_probes(GstBin *bin);
+    static GstPadProbeReturn latency_probe_sink(GstPad *pad, GstPadProbeInfo *info, gpointer user_data);
+    static GstPadProbeReturn latency_probe_src(GstPad *pad, GstPadProbeInfo *info, gpointer user_data);
+    static void element_added_callback(GstBin *bin, GstElement *element, gpointer user_data);
 
     // Private Methods
     void cycle_selected_target(bool forward);
@@ -110,6 +116,10 @@ private:
     // --- New Persistent Tracking Map ---
     std::map<guint64, TrackedObjectState> persistent_object_map_;
     std::mutex tracked_objects_mutex_;
+
+    // --- Latency Measurement ---
+    std::map<GstBuffer*, std::map<std::string, std::chrono::steady_clock::time_point>> latency_map_;
+    std::map<std::string, double> smoothed_latency_map_;
     
     // OSD Renderer
     std::unique_ptr<OSDRenderer> osd_renderer_;

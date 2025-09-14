@@ -56,6 +56,14 @@ public:
 
     void draw_reticule(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta, double center_x, double center_y, double size, const NvOSD_ColorParams &color, unsigned int line_width, ReticuleStyle style);
 
+    /**
+     * @brief Displays pipeline element latencies on the OSD.
+     * @param batch_meta Pointer to the batch metadata.
+     * @param frame_meta Pointer to the frame metadata.
+     * @param smoothed_latency_map A map of element names to their smoothed latency in milliseconds.
+     */
+    void display_latency(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta, const std::map<std::string, double>& smoothed_latency_map);
+
 private:
     rclcpp::Node* node_;
     // FPS members

@@ -48,6 +48,33 @@ void OSDRenderer::update_and_display_fps(NvDsBatchMeta *batch_meta, NvDsFrameMet
     draw_text(batch_meta, frame_meta, fps_text, 5, 5, white_color_);
 }
 
+void OSDRenderer::display_latency(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta, const std::map<std::string, double>& smoothed_latency_map)
+{
+    int y_offset = 25; // Start below the FPS counter
+    const int line_height = 15;
+
+    // To display in a somewhat logical order, we can copy to a vector and sort.
+    std::vector<std::pair<std::string, double>> latencies(smoothed_latency_map.begin(), smoothed_latency_map.end());
+    std::sort(latencies.begin(), latencies.end(), [](const auto& a, const auto& b) {
+        // A simple sort to group similar elements, not a true pipeline sort.
+        return a.first < b.first;
+    });
+
+    double total_latency = 0.0;
+    for (const auto& latency : latencies) {
+        std::stringstream ss;
+        ss << std::left << std::setw(18) << latency.first.substr(0, 17) << ": " << std::fixed << std::setprecision(2) << std::setw(6) << latency.second << " ms";
+        draw_text(batch_meta, frame_meta, ss.str(), 5, y_offset, white_color_);
+        y_offset += line_height;
+        total_latency += latency.second;
+    }
+
+    // Display Total Latency
+    std::stringstream total_ss;
+    total_ss << std::left << std::setw(18) << "Total" << ": " << std::fixed << std::setprecision(2) << std::setw(6) << total_latency << " ms";
+    draw_text(batch_meta, frame_meta, total_ss.str(), 5, y_offset, yellow_color_);
+}
+
 void OSDRenderer::render_non_selected_object_osd(NvDsBatchMeta* batch_meta, NvDsFrameMeta* frame_meta, NvDsObjectMeta *obj_meta)
 {
     // Standardized label format: CLASS ID
