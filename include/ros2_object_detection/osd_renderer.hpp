@@ -31,7 +31,7 @@ public:
     // Color members
     NvOSD_ColorParams red_color_, green_color_, blue_color_, white_color_, yellow_color_, black_color_;
 
-    void update_and_display_fps(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta);
+    double update_and_display_fps(NvDsBatchMeta* batch_meta, NvDsFrameMeta* frame_meta);
     
     /**
      * @brief Renders OSD for non-selected objects.

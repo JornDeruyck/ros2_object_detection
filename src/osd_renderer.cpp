@@ -32,7 +32,7 @@ OSDRenderer::OSDRenderer(rclcpp::Node* node_ptr)
 
 OSDRenderer::~OSDRenderer() {}
 
-void OSDRenderer::update_and_display_fps(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta)
+double OSDRenderer::update_and_display_fps(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta)
 {
     std::lock_guard<std::mutex> fps_lock(fps_mutex_);
     frame_count_++;
@@ -46,6 +46,8 @@ void OSDRenderer::update_and_display_fps(NvDsBatchMeta *batch_meta, NvDsFrameMet
     
     std::string fps_text = "FPS: " + std::to_string(static_cast<int>(current_fps_));
     draw_text(batch_meta, frame_meta, fps_text, 5, 5, white_color_);
+
+    return current_fps_; 
 }
 
 void OSDRenderer::display_latency(NvDsBatchMeta *batch_meta, NvDsFrameMeta *frame_meta, const std::map<std::string, double>& smoothed_latency_map)

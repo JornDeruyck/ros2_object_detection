@@ -42,6 +42,6 @@ def generate_launch_description():
     return LaunchDescription([
         SetEnvironmentVariable(name='GST_DEBUG', value=gst_debug_level),
         SetEnvironmentVariable(name='DISPLAY', value=":1"),
-        SetEnvironmentVariable(name='RMW_IMPLEMENTATION', value="rmw_cyclonedds_cpp"),
+        SetEnvironmentVariable(name='RMW_IMPLEMENTATION', value="rmw_fastrtps_cpp"),
         object_detection_node
     ])
