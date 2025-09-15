@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include <cinttypes> 
 
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
@@ -62,7 +63,7 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
     this->declare_parameter<std::string>("appsink_element_name", "ros_sink");
     this->declare_parameter<int>("kf_lost_threshold", 30);
     this->declare_parameter<double>("latency_smoothing_alpha", 0.05);
-    this->declare_parameter<bool>("enable_latency_measurement", true);
+    this->declare_parameter<bool>("enable_latency_measurement", false);
 
     std::string pipeline_string = this->get_parameter("pipeline_string").as_string();
     allowed_class_ids_ = this->get_parameter("allowed_class_ids").as_integer_array();
@@ -144,6 +145,7 @@ ObjectDetectionNode::ObjectDetectionNode(const rclcpp::NodeOptions &options)
     RCLCPP_INFO(this->get_logger(), "ObjectDetectionNode fully initialized and pipeline is playing.");
 }
 
+
 ObjectDetectionNode::~ObjectDetectionNode()
 {
     RCLCPP_INFO(this->get_logger(), "Shutting down ObjectDetectionNode...");
@@ -223,7 +225,7 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
     if (!batch_meta) return GST_PAD_PROBE_OK;
 
     const rclcpp::Time current_stamp = node->get_clock()->now();
-    std::vector<const TrackedObjectState*> objects_to_process;
+    std::vector<TrackedObjectState> objects_to_process; 
     guint64 current_locked_id = NO_OBJECT_ID;
     guint64 current_selected_id = NO_OBJECT_ID;
 
@@ -232,7 +234,7 @@ GstPadProbeReturn ObjectDetectionNode::osd_probe_callback(GstPad * /*pad*/, GstP
         node->update_tracking_state(batch_meta);
         node->prune_lost_tracks();
         for (const auto& pair : node->persistent_object_map_) {
-            objects_to_process.push_back(&pair.second);
+            objects_to_process.push_back(pair.second);
         }
         current_locked_id = node->locked_target_id_;
         current_selected_id = node->selected_object_id_;
@@ -260,10 +262,8 @@ void ObjectDetectionNode::update_tracking_state(NvDsBatchMeta* batch_meta) {
             bool is_allowed_class = allowed_class_ids_.empty() || (std::find(allowed_class_ids_.begin(), allowed_class_ids_.end(), obj_meta->class_id) != allowed_class_ids_.end());
             if (is_allowed_class) {
                 auto& object_state = persistent_object_map_[obj_meta->object_id];
-                // Check if this is a new object by seeing if KF is initialized.
-                // Using map operator[] default-constructs if key doesn't exist.
                 if (!object_state.kf_initialized) {
-                    object_state.kf = std::make_unique<KalmanFilter2D>();
+                    object_state.kf = std::make_shared<KalmanFilter2D>();
                 }
                 object_state.id = obj_meta->object_id;
                 object_state.class_label = std::string(obj_meta->obj_label);
@@ -294,7 +294,7 @@ void ObjectDetectionNode::prune_lost_tracks() {
         }
     }
 }
-void ObjectDetectionNode::render_osd(NvDsBatchMeta* batch_meta, const std::vector<const TrackedObjectState*>& objects_to_render, guint64 locked_id, guint64 selected_id) {
+void ObjectDetectionNode::render_osd(NvDsBatchMeta* batch_meta, const std::vector<TrackedObjectState>& objects_to_render, guint64 locked_id, guint64 selected_id) {
     if (!osd_renderer_ || !batch_meta->frame_meta_list) return;
     NvDsFrameMeta *frame_meta = (NvDsFrameMeta*)batch_meta->frame_meta_list->data;
     
@@ -320,39 +320,41 @@ void ObjectDetectionNode::render_osd(NvDsBatchMeta* batch_meta, const std::vecto
     }
     osd_renderer_->draw_reticule(batch_meta, frame_meta, center_x, center_y, 50.0, osd_renderer_->white_color_, 2, ReticuleStyle::CROSS_GAP);
 
-    for (const auto* object_state_ptr : objects_to_render) {
-        const auto& object_state = *object_state_ptr;
+    for (const auto& object_state : objects_to_render) {
         OSDTrackingStatus status = (object_state.frames_since_seen == 0) ? OSDTrackingStatus::DETECTED : OSDTrackingStatus::OCCLUDED;
         NvOSD_RectParams bbox_to_render = object_state.last_bbox;
-        if (status == OSDTrackingStatus::OCCLUDED) {
-            object_state.kf->predict();
-            bbox_to_render.left = object_state.kf->getX() - bbox_to_render.width / 2.0;
-            bbox_to_render.top = object_state.kf->getY() - bbox_to_render.height / 2.0;
-        }
-        bool is_locked = (object_state.id == locked_id);
-        if (is_locked || object_state.id == selected_id) {
-            osd_renderer_->render_selected_object_osd(batch_meta, frame_meta, object_state.id, object_state.class_label,
-                status, is_locked, bbox_to_render, object_state.frames_since_seen,
-                object_state.kf->getVx(), object_state.kf->getVy(), camera_fov_rad_);
-        } else if (status == OSDTrackingStatus::DETECTED) {
-            auto meta_it = current_meta_map.find(object_state.id);
-            if (meta_it != current_meta_map.end()) {
-                osd_renderer_->render_non_selected_object_osd(batch_meta, frame_meta, meta_it->second);
+        
+        if (object_state.kf) {
+            if (status == OSDTrackingStatus::OCCLUDED) {
+                object_state.kf->predict();
+                bbox_to_render.left = object_state.kf->getX() - bbox_to_render.width / 2.0;
+                bbox_to_render.top = object_state.kf->getY() - bbox_to_render.height / 2.0;
+            }
+            bool is_locked = (object_state.id == locked_id);
+            if (is_locked || object_state.id == selected_id) {
+                osd_renderer_->render_selected_object_osd(batch_meta, frame_meta, object_state.id, object_state.class_label,
+                    status, is_locked, bbox_to_render, object_state.frames_since_seen,
+                    object_state.kf->getVx(), object_state.kf->getVy(), camera_fov_rad_);
+            } else if (status == OSDTrackingStatus::DETECTED) {
+                auto meta_it = current_meta_map.find(object_state.id);
+                if (meta_it != current_meta_map.end()) {
+                    osd_renderer_->render_non_selected_object_osd(batch_meta, frame_meta, meta_it->second);
+                }
             }
         }
     }
 }
-void ObjectDetectionNode::publish_messages(const std::vector<const TrackedObjectState*>& objects_to_render, guint64 locked_id, const rclcpp::Time& stamp) {
+void ObjectDetectionNode::publish_messages(const std::vector<TrackedObjectState>& objects_to_render, guint64 locked_id, const rclcpp::Time& stamp) {
     vision_msgs::msg::Detection2DArray detection_array_msg;
     detection_array_msg.header.stamp = stamp;
     detection_array_msg.header.frame_id = frame_id_;
     const TrackedObjectState* locked_target_state = nullptr;
-    for (const auto* object_state_ptr : objects_to_render) {
+    for (const auto& object_state : objects_to_render) {
         vision_msgs::msg::Detection2D detection_msg;
-        populate_ros_detection_message(*object_state_ptr, detection_msg, stamp);
+        populate_ros_detection_message(object_state, detection_msg, stamp);
         detection_array_msg.detections.push_back(detection_msg);
-        if (object_state_ptr->id == locked_id) {
-            locked_target_state = object_state_ptr;
+        if (object_state.id == locked_id) {
+            locked_target_state = &object_state;
         }
     }
     if (!detection_array_msg.detections.empty()) {
@@ -368,7 +370,10 @@ void ObjectDetectionNode::publish_messages(const std::vector<const TrackedObject
     }
     target_publisher_->publish(target_msg);
 }
+
+// --- Latency Measurement ---
 void ObjectDetectionNode::calculate_and_clean_latency(GstBuffer *gst_buffer) {
+    std::lock_guard<std::mutex> lock(latency_mutex_);
     auto latency_it = latency_map_.find(gst_buffer);
     if (latency_it != latency_map_.end()) {
         const auto& timestamps = latency_it->second;
@@ -388,29 +393,97 @@ void ObjectDetectionNode::calculate_and_clean_latency(GstBuffer *gst_buffer) {
                 }
             }
         }
+        gst_buffer_unref(gst_buffer);
         latency_map_.erase(latency_it);
     }
 }
-
-// --- Latency Measurement Probes ---
 GstPadProbeReturn ObjectDetectionNode::latency_probe_sink(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
     auto *node = static_cast<ObjectDetectionNode *>(user_data);
     GstBuffer *buf = GST_BUFFER(info->data);
+    
     GstElement *parent_element = gst_pad_get_parent_element(pad);
     std::string element_name = gst_element_get_name(parent_element);
     gst_object_unref(parent_element);
+    
+    std::lock_guard<std::mutex> lock(node->latency_mutex_);
+    gst_buffer_ref(buf);
     node->latency_map_[buf][element_name + "_sink"] = std::chrono::steady_clock::now();
+    
     return GST_PAD_PROBE_OK;
 }
 GstPadProbeReturn ObjectDetectionNode::latency_probe_src(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
     auto *node = static_cast<ObjectDetectionNode *>(user_data);
     GstBuffer *buf = GST_BUFFER(info->data);
+    
     GstElement *parent_element = gst_pad_get_parent_element(pad);
     std::string element_name = gst_element_get_name(parent_element);
     gst_object_unref(parent_element);
+    
+    std::lock_guard<std::mutex> lock(node->latency_mutex_);
     node->latency_map_[buf][element_name + "_src"] = std::chrono::steady_clock::now();
+
     return GST_PAD_PROBE_OK;
 }
+
+// --- Service Handlers and Helpers ---
+void ObjectDetectionNode::handle_lock_target(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/, std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+    std::lock_guard<std::mutex> lock(tracked_objects_mutex_);
+    if (selected_object_id_ != NO_OBJECT_ID) {
+        locked_target_id_ = selected_object_id_;
+        // FIX: Use correct C-style format specifiers for logging
+        RCLCPP_INFO(this->get_logger(), "Target locked: %ld", locked_target_id_);
+        response->success = true;
+        response->message = "Target locked: " + std::to_string(locked_target_id_);
+    } else {
+        RCLCPP_WARN(this->get_logger(), "No target selected to lock.");
+        response->success = false;
+        response->message = "No target selected to lock.";
+    }
+}
+void ObjectDetectionNode::cycle_selected_target(bool forward)
+{
+    std::lock_guard<std::mutex> lock(tracked_objects_mutex_);
+    if (persistent_object_map_.empty()) {
+        if (selected_object_id_ != NO_OBJECT_ID) {
+            RCLCPP_INFO(this->get_logger(), "No objects detected. Deselecting target.");
+            selected_object_id_ = NO_OBJECT_ID;
+        }
+        return;
+    }
+
+    auto it = persistent_object_map_.find(selected_object_id_);
+
+    if (it == persistent_object_map_.end()) {
+        if (forward) {
+            selected_object_id_ = persistent_object_map_.begin()->first;
+        } else {
+            auto last_it = std::prev(persistent_object_map_.end());
+            selected_object_id_ = last_it->first;
+        }
+        // FIX: Use correct C-style format specifiers for logging
+        RCLCPP_INFO(this->get_logger(), "No object selected. Selecting first/last: %ld", selected_object_id_);
+    } else {
+        if (forward) {
+            it++;
+            selected_object_id_ = (it == persistent_object_map_.end()) ? NO_OBJECT_ID : it->first;
+        } else {
+            if (it == persistent_object_map_.begin()) {
+                selected_object_id_ = NO_OBJECT_ID;
+            } else {
+                it--;
+                selected_object_id_ = it->first;
+            }
+        }
+    }
+
+    if (selected_object_id_ == NO_OBJECT_ID) {
+        RCLCPP_INFO(this->get_logger(), "Cycled to deselection.");
+    } else {
+        // FIX: Use correct C-style format specifiers for logging
+        RCLCPP_INFO(this->get_logger(), "Cycled to new object: %ld", selected_object_id_);
+    }
+}
+
 void ObjectDetectionNode::element_added_callback(GstBin * /*bin*/, GstElement *element, gpointer user_data) {
     auto *node = static_cast<ObjectDetectionNode *>(user_data);
     const gchar* name = gst_element_get_name(element);
@@ -453,24 +526,13 @@ void ObjectDetectionNode::add_latency_probes(GstBin *bin) {
             case GST_ITERATOR_DONE:
                 done = true;
                 break;
+            case GST_ITERATOR_ERROR:
+                // Handle error case to satisfy -Wswitch warning
+                done = true;
+                break;
         }
     }
     gst_iterator_free(it);
-}
-
-// --- Service Handlers ---
-void ObjectDetectionNode::handle_lock_target(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/, std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
-    std::lock_guard<std::mutex> lock(tracked_objects_mutex_);
-    if (selected_object_id_ != NO_OBJECT_ID) {
-        locked_target_id_ = selected_object_id_;
-        RCLCPP_INFO(this->get_logger(), "Target locked: %ld", locked_target_id_);
-        response->success = true;
-        response->message = "Target locked: " + std::to_string(locked_target_id_);
-    } else {
-        RCLCPP_WARN(this->get_logger(), "No target selected to lock.");
-        response->success = false;
-        response->message = "No target selected to lock.";
-    }
 }
 void ObjectDetectionNode::handle_unlock_target(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/, std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
     std::lock_guard<std::mutex> lock(tracked_objects_mutex_);
@@ -489,8 +551,6 @@ void ObjectDetectionNode::handle_cycle_backward(const std::shared_ptr<std_srvs::
     response->success = true;
     response->message = "Cycled target backward";
 }
-
-// --- Helper Functions ---
 void ObjectDetectionNode::populate_ros_detection_message(const TrackedObjectState& object_state, vision_msgs::msg::Detection2D& detection_msg, const rclcpp::Time& stamp) {
     detection_msg.header.stamp = stamp;
     detection_msg.header.frame_id = frame_id_;
@@ -500,56 +560,19 @@ void ObjectDetectionNode::populate_ros_detection_message(const TrackedObjectStat
     hypothesis.hypothesis.score = (object_state.frames_since_seen == 0) ? object_state.confidence : 0.0;
     detection_msg.results.push_back(hypothesis);
 
-    if (object_state.frames_since_seen == 0) {
-        detection_msg.bbox.center.position.x = object_state.last_bbox.left + object_state.last_bbox.width / 2.0;
-        detection_msg.bbox.center.position.y = object_state.last_bbox.top + object_state.last_bbox.height / 2.0;
-    } else {
-        detection_msg.bbox.center.position.x = object_state.kf->getX();
-        detection_msg.bbox.center.position.y = object_state.kf->getY();
+    if (object_state.kf) {
+        if (object_state.frames_since_seen == 0) {
+            detection_msg.bbox.center.position.x = object_state.last_bbox.left + object_state.last_bbox.width / 2.0;
+            detection_msg.bbox.center.position.y = object_state.last_bbox.top + object_state.last_bbox.height / 2.0;
+        } else {
+            detection_msg.bbox.center.position.x = object_state.kf->getX();
+            detection_msg.bbox.center.position.y = object_state.kf->getY();
+        }
     }
     detection_msg.bbox.size_x = object_state.last_bbox.width;
     detection_msg.bbox.size_y = object_state.last_bbox.height;
     detection_msg.id = std::to_string(object_state.id);
 }
-
-void ObjectDetectionNode::cycle_selected_target(bool forward)
-{
-    std::lock_guard<std::mutex> lock(tracked_objects_mutex_);
-    if (persistent_object_map_.empty()) {
-        if (selected_object_id_ != NO_OBJECT_ID) {
-            RCLCPP_INFO(this->get_logger(), "No objects detected. Deselecting target.");
-            selected_object_id_ = NO_OBJECT_ID;
-        }
-        return;
-    }
-
-    auto it = persistent_object_map_.find(selected_object_id_);
-
-    if (it == persistent_object_map_.end()) {
-        selected_object_id_ = forward ? persistent_object_map_.begin()->first : persistent_object_map_.rbegin()->first;
-        RCLCPP_INFO(this->get_logger(), "No object selected. Selecting first/last: %lu", selected_object_id_);
-    } else {
-        if (forward) {
-            it++;
-            selected_object_id_ = (it == persistent_object_map_.end()) ? NO_OBJECT_ID : it->first;
-        } else {
-            if (it == persistent_object_map_.begin()) {
-                selected_object_id_ = NO_OBJECT_ID;
-            } else {
-                it--;
-                selected_object_id_ = it->first;
-            }
-        }
-    }
-
-    if (selected_object_id_ == NO_OBJECT_ID) {
-        RCLCPP_INFO(this->get_logger(), "Cycled to deselection.");
-    } else {
-        RCLCPP_INFO(this->get_logger(), "Cycled to new object: %lu", selected_object_id_);
-    }
-}
-
-// --- Main Function ---
 int main(int argc, char *argv[])
 {
     rclcpp::init(argc, argv);

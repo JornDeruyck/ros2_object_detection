@@ -44,19 +44,12 @@ struct TrackedObjectState {
     std::string class_label;
     float confidence;
     NvOSD_RectParams last_bbox;
-    std::unique_ptr<KalmanFilter2D> kf;
+    // FIX (Feedback #2): Use shared_ptr to make this struct copyable
+    std::shared_ptr<KalmanFilter2D> kf;
     unsigned int frames_since_seen;
     bool kf_initialized;
 
     TrackedObjectState() : id(0), confidence(0.0), frames_since_seen(0), kf_initialized(false) {}
-
-    // Add move constructor and assignment to handle ownership of unique_ptr
-    TrackedObjectState(TrackedObjectState&& other) noexcept = default;
-    TrackedObjectState& operator=(TrackedObjectState&& other) noexcept = default;
-
-    // Delete copy constructor and assignment
-    TrackedObjectState(const TrackedObjectState&) = delete;
-    TrackedObjectState& operator=(const TrackedObjectState&) = delete;
 };
 
 
@@ -96,8 +89,9 @@ private:
     // --- Core Logic (Refactored from osd_probe_callback) ---
     void update_tracking_state(NvDsBatchMeta* batch_meta);
     void prune_lost_tracks();
-    void render_osd(NvDsBatchMeta* batch_meta, const std::vector<const TrackedObjectState*>& objects_to_render, guint64 locked_id, guint64 selected_id);
-    void publish_messages(const std::vector<const TrackedObjectState*>& objects_to_render, guint64 locked_id, const rclcpp::Time& stamp);
+    // FIX (Feedback #2): Take a vector of copies to prevent dangling pointers
+    void render_osd(NvDsBatchMeta* batch_meta, const std::vector<TrackedObjectState>& objects_to_render, guint64 locked_id, guint64 selected_id);
+    void publish_messages(const std::vector<TrackedObjectState>& objects_to_render, guint64 locked_id, const rclcpp::Time& stamp);
 
     // --- Service Handlers ---
     void handle_lock_target(const std::shared_ptr<std_srvs::srv::Trigger::Request> request, std::shared_ptr<std_srvs::srv::Trigger::Response> response);
@@ -119,6 +113,8 @@ private:
     // --- Latency Measurement State ---
     std::map<GstBuffer*, std::map<std::string, std::chrono::steady_clock::time_point>> latency_map_;
     std::map<std::string, double> smoothed_latency_map_;
+    // FIX (Feedback #1 & #7): Add mutex for latency maps
+    std::mutex latency_mutex_;
     
     // OSD Renderer
     std::unique_ptr<OSDRenderer> osd_renderer_;
