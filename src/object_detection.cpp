@@ -374,7 +374,6 @@ void ObjectDetectionNode::calculate_and_clean_latency(GstBuffer *gst_buffer) {
                 }
             }
         }
-        gst_buffer_unref(gst_buffer);
         latency_map_.erase(latency_it);
     }
 }
@@ -387,7 +386,6 @@ GstPadProbeReturn ObjectDetectionNode::latency_probe_sink(GstPad *pad, GstPadPro
     g_free(element_name_ptr);
     gst_object_unref(parent_element);
     std::lock_guard<std::mutex> lock(node->latency_mutex_);
-    gst_buffer_ref(buf);
     node->latency_map_[buf][element_key + "_sink"] = std::chrono::steady_clock::now();
     return GST_PAD_PROBE_OK;
 }
